@@ -390,11 +390,82 @@ def summarize_batch_result(
 ) -> Dict[str, Any]:
     """批量同步的逐设备结果归纳，产出"成功/部分失败/全部失败"反馈。
 
-    契约 C9：后端按单事务返回整体结果，前端据"请求 SN 集合 - 返回 entities 集合"
-    显式提示未覆盖的设备，避免把部分失败展示为完全成功。
+    契约 §4.6 R1–R3：后端对每台设备独立提交，并在 ``results`` 里逐台给出
+    ``ok``/``skipped``/``error``，同时汇总 ``succeeded``/``failed``/``skipped``/
+    ``partial``。前端优先消费这些字段，能区分"处理失败"与"按规则跳过"（例如配置
+    同步时本地台账没有该设备）。若后端响应里没有 ``results``（旧版本），退回
+    "请求 SN − 返回 entities"的差集口径，保证不会把部分失败展示成完全成功。
     """
     requested = [item for item in (requested or []) if item]
     payload = result if isinstance(result, dict) else {}
+    results = payload.get('results')
+    if isinstance(results, list) and results:
+        failed = [
+            item
+            for item in results
+            if isinstance(item, dict)
+            and not item.get('ok')
+            and not item.get('skipped')
+        ]
+        skipped = [
+            item
+            for item in results
+            if isinstance(item, dict) and item.get('skipped')
+        ]
+        total = payload.get('total') or len(requested) or len(results)
+        succeeded = payload.get('succeeded')
+        if succeeded is None:
+            succeeded = total - len(failed) - len(skipped)
+        failed_codes = [str(item.get('sn') or '未知设备') for item in failed]
+        skipped_codes = [str(item.get('sn') or '未知设备') for item in skipped]
+        detail = next(
+            (str(item.get('error')) for item in failed if item.get('error')),
+            '',
+        )
+        if not failed and not skipped:
+            return {
+                'level': 'success',
+                'message': f'{action}成功：{succeeded}/{total} 台设备已更新',
+                'missing': [],
+                'skipped': [],
+            }
+        if not failed:
+            return {
+                'level': 'warning',
+                'message': (
+                    f'{action}完成：{succeeded}/{total} 台已更新，'
+                    f'{len(skipped)} 台跳过（{"、".join(skipped_codes)}）'
+                ),
+                'missing': [],
+                'skipped': skipped_codes,
+            }
+        if not succeeded:
+            return {
+                'level': 'error',
+                'message': (
+                    f'{action}全部失败：0/{total} 台成功；'
+                    f'失败：{"、".join(failed_codes)}'
+                    + (f'（{detail}）' if detail else '')
+                ),
+                'missing': failed_codes,
+                'skipped': skipped_codes,
+            }
+        return {
+            'level': 'warning',
+            'message': (
+                f'{action}部分失败：{succeeded}/{total} 台成功；'
+                f'失败：{"、".join(failed_codes)}'
+                + (f'（{detail}）' if detail else '')
+                + (
+                    f'；跳过：{"、".join(skipped_codes)}'
+                    if skipped_codes
+                    else ''
+                )
+            ),
+            'missing': failed_codes,
+            'skipped': skipped_codes,
+        }
+
     entities = payload.get('entities')
     returned = set()
     if isinstance(entities, list):
@@ -409,12 +480,14 @@ def summarize_batch_result(
             'level': 'warning',
             'message': f'{action}未选择设备',
             'missing': [],
+            'skipped': [],
         }
     if not missing:
         return {
             'level': 'success',
             'message': f'{action}成功：{ok_count}/{total} 台设备已更新',
             'missing': [],
+            'skipped': [],
         }
     if ok_count == 0:
         return {
@@ -424,6 +497,7 @@ def summarize_batch_result(
                 f'未返回：{"、".join(missing)}'
             ),
             'missing': missing,
+            'skipped': [],
         }
     return {
         'level': 'warning',
@@ -432,6 +506,7 @@ def summarize_batch_result(
             f'未返回：{"、".join(missing)}'
         ),
         'missing': missing,
+        'skipped': [],
     }
 
 
@@ -660,13 +735,22 @@ def extract_msg_id(response: Any) -> Optional[str]:
 
 
 def command_result_items(
-    remote: Optional[Dict[str, Any]],
-    local: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]],
 ) -> List[Dict[str, str]]:
-    """指令结果：厂商回执 + 本地控制日志。
+    """指令结果：合并厂商回执与本地控制日志（契约 §4.5 / §4.7）。
 
-    厂商 ``payload`` / ``response`` 结构未定义（契约 U9），按原样脱敏展示。
+    契约 Stage 4 定稿的响应为 ``{remote, remote_error, local}``：厂商侧"记录不存在"
+    时仍能用本地留存的 ``msg_id`` 交代结果，因此这里把 ``remote_error`` 单独展示，
+    不当作整体失败。厂商 ``payload``/``response`` 结构未定义（U9），按原样脱敏展示。
+    兼容旧版直接把厂商对象作为 ``data`` 返回的情况。
     """
+    payload = data if isinstance(data, dict) else {}
+    if 'remote' in payload or 'local' in payload or 'remote_error' in payload:
+        remote = payload.get('remote')
+        local = payload.get('local')
+        remote_error = payload.get('remote_error')
+    else:
+        remote, local, remote_error = payload, None, None
     remote = remote if isinstance(remote, dict) else {}
     local = local if isinstance(local, dict) else {}
     status_value = remote.get('status')
@@ -717,12 +801,42 @@ def command_result_items(
             'children': format_payload(remote.get('response')) or '暂无',
         },
         {
+            'label': '厂商回执说明',
+            'children': mask_secret_text(str(remote_error)) or '-',
+        },
+        {
             'label': '错误信息',
             'children': local.get('error_message')
             or remote.get('message')
             or '-',
         },
     ]
+
+
+def command_result_alert(data: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """指令结果的顶部提示：区分"厂商回执正常/厂商侧暂无记录/两边都无"。"""
+    payload = data if isinstance(data, dict) else {}
+    remote = payload.get('remote')
+    local = payload.get('local')
+    remote_error = payload.get('remote_error')
+    if isinstance(remote, dict):
+        status = remote.get('status')
+        return {
+            'type': 'info',
+            'text': (
+                f'厂商回执状态：{COMMAND_STATUS_LABELS.get(status, status)}'
+            ),
+        }
+    if isinstance(local, dict):
+        return {
+            'type': 'warning',
+            'text': (
+                '厂商侧暂无该指令记录'
+                + (f'（{remote_error}）' if remote_error else '')
+                + '，以下为本地控制日志'
+            ),
+        }
+    return {'type': 'error', 'text': '未查询到指令结果，请确认 msg_id 是否正确'}
 
 
 def has_permission(perms: Optional[List[str]], required: str) -> bool:
@@ -755,7 +869,16 @@ def control_action_buttons(perms: Optional[List[str]]) -> List[Dict[str, str]]:
             ]
         )
     if has_permission(perms, 'device:manage:edit'):
-        buttons.append({'content': '修改', 'type': 'link', 'icon': 'antd-edit'})
+        buttons.extend(
+            [
+                {'content': '修改', 'type': 'link', 'icon': 'antd-edit'},
+                {
+                    'content': '状态维护',
+                    'type': 'link',
+                    'icon': 'antd-setting',
+                },
+            ]
+        )
     if has_permission(perms, 'device:manage:remove'):
         buttons.append(
             {'content': '删除', 'type': 'link', 'icon': 'antd-delete'}

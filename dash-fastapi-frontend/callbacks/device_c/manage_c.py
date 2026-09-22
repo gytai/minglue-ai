@@ -613,7 +613,6 @@ def open_command_modal(
         Output('device-command-alert', 'visible'),
         Output('device-command-result-modal', 'visible'),
         Output('device-command-descriptions', 'items'),
-        Output('device-command-log-table', 'data'),
     ],
     Input('device-command-modal', 'okCounts'),
     [
@@ -624,27 +623,45 @@ def open_command_modal(
     prevent_initial_call=True,
 )
 def query_command_result(ok, device_code, msg_id):
-    """查询指令结果：厂商回执 + 本地控制日志（幂等/受理信息）。"""
+    """查询指令结果：直接消费后端合并结果（契约 §4.5 / §4.7）。
+
+    ``GET /device/{sn}/command/{msg_id}`` 返回 ``{remote, remote_error, local}``，
+    厂商侧暂无记录时用本地控制日志兜底，因此无需在前端拼两份数据。
+    ``msg_id`` 留空时按设备取最近一条本地控制日志（需要 ``device:control:list``）。
+    """
     if not ok or not device_code:
         raise PreventUpdate
-    local_rows = logic.format_control_rows([])
-    if logic.has_permission(current_permissions(), 'device:control:list'):
-        query = logic.build_control_log_query(
-            device_code=device_code,
-            msg_id=msg_id or None,
-            page_num=1,
-            page_size=5,
-        )
+    if not msg_id:
+        if not logic.has_permission(
+            current_permissions(), 'device:control:list'
+        ):
+            return (
+                no_update,
+                '请填写 msg_id；本账号无控制日志查询权限，无法自动取最近一条指令',
+                'warning',
+                True,
+                False,
+                no_update,
+            )
         try:
-            local_rows = logic.format_control_rows(
-                DeviceApi.list_control_logs(query).get('rows')
+            rows = logic.format_control_rows(
+                DeviceApi.list_control_logs(
+                    logic.build_control_log_query(
+                        device_code=device_code, page_num=1, page_size=1
+                    )
+                ).get('rows')
             )
         except EXPECTED_ERRORS as exc:
-            notify_failure(exc, '查询本地控制日志')
-    else:
-        report('warning', '当前账号无控制日志查询权限，仅展示厂商回执')
-    if not msg_id:
-        msg_id = logic.extract_msg_id(local_rows[0]) if local_rows else None
+            classified = notify_failure(exc, '查询本地控制日志')
+            return (
+                no_update,
+                classified['message'],
+                'error',
+                True,
+                False,
+                no_update,
+            )
+        msg_id = logic.extract_msg_id(rows[0]) if rows else None
         if not msg_id:
             return (
                 no_update,
@@ -653,39 +670,98 @@ def query_command_result(ok, device_code, msg_id):
                 True,
                 False,
                 no_update,
-                local_rows,
             )
         MessageManager.info(content=f'已取最近一条控制日志的 msg_id：{msg_id}')
-    local_record = local_rows[0] if local_rows else {}
     try:
-        remote = DeviceApi.get_command_log(device_code, msg_id).get('data')
+        data = DeviceApi.get_command_log(device_code, msg_id).get('data')
     except EXPECTED_ERRORS as exc:
-        classified = notify_failure(exc, '查询厂商指令回执')
-        remote = None
-        alert_type = 'error' if classified['level'] == 'error' else 'warning'
-    else:
-        alert_type = 'info'
-    if remote is None and not local_record:
+        classified = notify_failure(exc, '查询指令结果')
         return (
             msg_id,
-            '未查询到指令结果，请确认 msg_id 是否正确',
+            classified['message'],
             'error',
             True,
             False,
             no_update,
-            local_rows,
         )
-    alert_text = (
-        f'厂商回执状态：{logic.COMMAND_STATUS_LABELS.get(remote.get("status"), remote.get("status"))}'
-        if isinstance(remote, dict)
-        else '厂商回执不可用，以下为本地控制日志'
-    )
+    alert = logic.command_result_alert(data)
     return (
         msg_id,
-        alert_text,
-        alert_type,
+        alert['text'],
+        alert['type'],
         True,
         True,
-        logic.command_result_items(remote, local_record),
-        local_rows,
+        logic.command_result_items(data),
     )
+
+
+@app.callback(
+    [
+        Output('device-status-modal', 'visible'),
+        Output('device-status-device-code', 'value'),
+        Output('device-status-value', 'value'),
+        Output('device-status-bind-status', 'value'),
+    ],
+    Input('device-list-table', 'nClicksButton'),
+    [
+        State('device-list-table', 'clickedContent'),
+        State('device-list-table', 'recentlyButtonClickedRow'),
+    ],
+    prevent_initial_call=True,
+)
+def open_status_modal(click, clicked, row):
+    """状态维护入口（契约 §4.7 ``PUT /device/status``，守卫 ``device:manage:edit``）。"""
+    if not click or clicked != '状态维护':
+        raise PreventUpdate
+    return (
+        True,
+        row.get('device_code'),
+        row.get('status') if row.get('status') in logic.STATUS_LABELS else None,
+        row.get('bind_status')
+        if row.get('bind_status') in logic.BIND_LABELS
+        else None,
+    )
+
+
+@app.callback(
+    Output('device-operations-store', 'data', allow_duplicate=True),
+    Input('device-status-modal', 'okCounts'),
+    [
+        State('device-status-device-code', 'value'),
+        State('device-status-value', 'value'),
+        State('device-status-bind-status', 'value'),
+        State('device-list-table', 'data'),
+    ],
+    running=[[Output('device-status-modal', 'confirmLoading'), True, False]],
+    prevent_initial_call=True,
+)
+def save_device_status(ok, device_code, status, bind_status, table_data):
+    """提交状态维护：只提交被改动的字段，避免把未改字段覆盖成空。"""
+    if not ok or not device_code:
+        raise PreventUpdate
+    device_id = next(
+        (
+            int(item['key'])
+            for item in (table_data or [])
+            if item.get('device_code') == device_code
+        ),
+        None,
+    )
+    if not device_id:
+        report('error', '状态维护失败：未在列表中匹配到该设备，请刷新后重试')
+        return {'type': 'status', 'ok': False}
+    payload = {'device_id': device_id}
+    if status:
+        payload['status'] = status
+    if bind_status:
+        payload['bind_status'] = bind_status
+    if len(payload) == 1:
+        report('warning', '状态维护需要有改动：请选择本地状态或绑定状态')
+        return {'type': 'status', 'ok': False}
+    try:
+        DeviceApi.update_status(payload)
+    except EXPECTED_ERRORS as exc:
+        notify_failure(exc, '状态维护')
+        return {'type': 'status', 'ok': False}
+    MessageManager.success(content='设备状态已更新')
+    return {'type': 'status', 'ok': True}

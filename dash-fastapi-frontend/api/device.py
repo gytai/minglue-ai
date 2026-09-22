@@ -32,6 +32,13 @@ class DeviceApi:
         return api_request(url=f'/device/{device_ids}', method=ApiMethod.DELETE)
 
     @classmethod
+    def update_status(cls, payload: dict):
+        """本地状态字段维护（在线/绑定，契约 §4.7）。远端同步只覆盖遥测字段。"""
+        return api_request(
+            url='/device/status', method=ApiMethod.PUT, json=payload
+        )
+
+    @classmethod
     def sync_status(cls, sns: list[str]):
         return api_request(
             url='/device/remote/status',

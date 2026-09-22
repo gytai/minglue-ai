@@ -154,27 +154,102 @@ def test_build_device_config_items_keeps_undefined_snapshot_raw():
 
 
 def test_summarize_batch_result_reports_partial_failure():
-    """契约 C9/E10：部分设备未返回数据时必须显式提示，而不是报"全部成功"。"""
+    """契约 §4.6 R2/R3：优先消费后端逐台结果，部分失败必须显式提示。"""
     summary = logic.summarize_batch_result(
         ['A', 'B', 'C'],
-        {'entities': [{'sn': 'A'}, {'sn': 'B'}], 'synced': 2},
+        {
+            'total': 3,
+            'succeeded': 2,
+            'failed': 1,
+            'skipped': 0,
+            'partial': True,
+            'synced': 2,
+            'results': [
+                {'sn': 'A', 'ok': True, 'skipped': False},
+                {'sn': 'B', 'ok': True, 'skipped': False},
+                {
+                    'sn': 'C',
+                    'ok': False,
+                    'skipped': False,
+                    'error': '厂商未返回该设备',
+                },
+            ],
+        },
         '同步状态',
     )
     assert summary['level'] == 'warning'
     assert '部分失败' in summary['message']
     assert '2/3' in summary['message']
+    assert '厂商未返回该设备' in summary['message']
     assert summary['missing'] == ['C']
+
+
+def test_summarize_batch_result_uses_legacy_entity_diff_when_results_absent():
+    """兼容旧版后端：没有逐台 results 时退回"请求 SN − 返回 entities"口径。"""
+    summary = logic.summarize_batch_result(
+        ['A', 'B'],
+        {'entities': [{'sn': 'A'}], 'synced': 1},
+        '同步状态',
+    )
+    assert summary['level'] == 'warning'
+    assert summary['missing'] == ['B']
+
+
+def test_summarize_batch_result_distinguishes_skipped_from_failed():
+    """契约 §4.6 R5：配置同步时本地没有该设备应记为跳过，而不是失败。"""
+    skipped_only = logic.summarize_batch_result(
+        ['A', 'B'],
+        {
+            'total': 2,
+            'succeeded': 1,
+            'failed': 0,
+            'skipped': 1,
+            'results': [
+                {'sn': 'A', 'ok': True, 'skipped': False},
+                {
+                    'sn': 'B',
+                    'ok': False,
+                    'skipped': True,
+                    'error': '本地台账中不存在该设备',
+                },
+            ],
+        },
+        '同步配置',
+    )
+    assert skipped_only['level'] == 'warning'
+    assert '1 台跳过' in skipped_only['message']
+    assert skipped_only['missing'] == []
+    assert skipped_only['skipped'] == ['B']
 
 
 def test_summarize_batch_result_all_and_none():
     all_ok = logic.summarize_batch_result(
-        ['A'], {'entities': [{'sn': 'A'}], 'synced': 1}, '同步配置'
+        ['A'],
+        {
+            'total': 1,
+            'succeeded': 1,
+            'failed': 0,
+            'skipped': 0,
+            'results': [{'sn': 'A', 'ok': True, 'skipped': False}],
+        },
+        '同步配置',
     )
     assert all_ok['level'] == 'success'
     assert '1/1' in all_ok['message']
 
     none_ok = logic.summarize_batch_result(
-        ['A', 'B'], {'entities': [], 'synced': 0}, '同步配置'
+        ['A', 'B'],
+        {
+            'total': 2,
+            'succeeded': 0,
+            'failed': 2,
+            'skipped': 0,
+            'results': [
+                {'sn': 'A', 'ok': False, 'skipped': False, 'error': '超时'},
+                {'sn': 'B', 'ok': False, 'skipped': False, 'error': '超时'},
+            ],
+        },
+        '同步配置',
     )
     assert none_ok['level'] == 'error'
     assert '全部失败' in none_ok['message']
@@ -322,7 +397,7 @@ def test_control_action_buttons_follow_permissions():
     readonly = logic.control_action_buttons(['device:manage:query'])
     assert [item['content'] for item in readonly] == ['详情']
     write_only = logic.control_action_buttons(['device:manage:edit'])
-    assert [item['content'] for item in write_only] == ['修改']
+    assert [item['content'] for item in write_only] == ['修改', '状态维护']
     control_only = logic.control_action_buttons(['device:manage:control'])
     assert [item['content'] for item in control_only] == [
         '开始录音',
@@ -331,33 +406,74 @@ def test_control_action_buttons_follow_permissions():
     ]
 
 
-def test_extract_msg_id_and_command_result_items():
+def test_extract_msg_id():
     """契约 C8：录音指令返回的 msg_id 要能串起指令结果查询。"""
     assert logic.extract_msg_id({'msg_id': 'm-1'}) == 'm-1'
     assert logic.extract_msg_id({}) is None
     assert logic.extract_msg_id(None) is None
 
+
+def test_command_result_items_merges_remote_and_local():
+    """契约 §4.7：`{remote, remote_error, local}` 合并展示，且不泄露敏感值。"""
     items = logic.command_result_items(
         {
-            'sn': 'MLR1',
-            'cmd': 'start/shadow',
-            'msg_id': 'm-1',
-            'status': 3,
-            'req_time': '2025-11-01T10:00:00',
-            'resp_time': '2025-11-01T10:00:04',
-            'response': {'token': 'leak-me'},
-        },
-        {
-            'device_code': 'MLR1',
-            'command': 'start_recording',
-            'msg_id': 'm-1',
-            'request_status': 'success',
-            'remote_status': 0,
-            'payload_json': '{"sn": "MLR1"}',
-        },
+            'remote': {
+                'sn': 'MLR1',
+                'cmd': 'start/shadow',
+                'msg_id': 'm-1',
+                'status': 3,
+                'req_time': '2025-11-01T10:00:00',
+                'resp_time': '2025-11-01T10:00:04',
+                'response': {'token': 'leak-me'},
+            },
+            'remote_error': None,
+            'local': {
+                'device_code': 'MLR1',
+                'command': 'start_recording',
+                'msg_id': 'm-1',
+                'request_status': 'success',
+                'remote_status': 0,
+                'payload_json': '{"sn": "MLR1"}',
+            },
+        }
     )
     values = {item['label']: item['children'] for item in items}
     assert values['厂商状态'] == '返回超时'
     assert values['本地受理结果'] == '已受理'
     assert values['请求时间'] == '2025-11-01 10:00:00'
     assert 'leak-me' not in values['厂商响应']
+
+
+def test_command_result_items_tolerates_missing_remote():
+    """厂商侧暂无记录时，用本地控制日志交代结果并保留厂商错误说明。"""
+    items = logic.command_result_items(
+        {
+            'remote': None,
+            'remote_error': '指令接收日志不存在',
+            'local': {
+                'device_code': 'MLR1',
+                'command': 'stop_recording',
+                'msg_id': 'm-2',
+                'request_status': 'failed',
+                'error_message': '厂商超时',
+            },
+        }
+    )
+    values = {item['label']: item['children'] for item in items}
+    assert values['指令'] == '停止录音'
+    assert values['厂商状态'] == '-'
+    assert values['厂商回执说明'] == '指令接收日志不存在'
+    assert values['错误信息'] == '厂商超时'
+    assert values['本地受理结果'] == '失败'
+
+
+def test_command_result_alert_levels():
+    assert logic.command_result_alert(
+        {'remote': {'status': 1}, 'local': None}
+    ) == {'type': 'info', 'text': '厂商回执状态：成功'}
+    fallback = logic.command_result_alert(
+        {'remote': None, 'remote_error': '记录不存在', 'local': {'msg_id': 'm'}}
+    )
+    assert fallback['type'] == 'warning'
+    assert '本地控制日志' in fallback['text']
+    assert logic.command_result_alert({})['type'] == 'error'

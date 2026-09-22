@@ -411,36 +411,54 @@ def render(*args, **kwargs):
                     column=2,
                     bordered=True,
                 ),
-                fac.AntdDivider('最近一次本地控制日志'),
-                fac.AntdTable(
-                    id='device-command-log-table',
-                    columns=[
-                        {'title': '指令', 'dataIndex': 'command_display'},
-                        {'title': '消息ID', 'dataIndex': 'msg_id'},
-                        {
-                            'title': '受理结果',
-                            'dataIndex': 'request_status_display',
-                        },
-                        {
-                            'title': '厂商状态',
-                            'dataIndex': 'remote_status_display',
-                        },
-                        {
-                            'title': '时间',
-                            'dataIndex': 'create_time',
-                            'width': 170,
-                        },
-                    ],
-                    size='small',
-                    bordered=True,
-                    pagination=False,
-                    style={'width': '100%'},
-                ),
             ],
             id='device-command-result-modal',
             title='指令结果',
             width=820,
             renderFooter=False,
+        ),
+        fac.AntdModal(
+            fac.AntdForm(
+                [
+                    fac.AntdFormItem(
+                        fac.AntdInput(
+                            id='device-status-device-code',
+                            disabled=True,
+                        ),
+                        label='设备编码',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdSelect(
+                            id='device-status-value',
+                            options=STATUS_OPTIONS,
+                            allowClear=True,
+                        ),
+                        label='本地状态',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdSelect(
+                            id='device-status-bind-status',
+                            options=BIND_OPTIONS,
+                            allowClear=True,
+                        ),
+                        label='绑定状态',
+                    ),
+                    fac.AntdAlert(
+                        '本地状态由人工维护；心跳与批量状态同步只覆盖遥测字段，'
+                        '不会把停用设备改回在线。留空的字段不会被修改。',
+                        type='info',
+                        showIcon=True,
+                    ),
+                ],
+                id='device-status-form',
+                labelCol={'span': 5},
+                wrapperCol={'span': 19},
+            ),
+            id='device-status-modal',
+            width=560,
+            renderFooter=True,
+            okClickClose=False,
+            title='状态维护',
         ),
         fac.AntdModal(
             fac.AntdText('是否确认停止该设备的录音？', id='device-stop-text'),

@@ -75,8 +75,15 @@ def device_api(monkeypatch):
             calls['sync_status'] = sns
             return {
                 'data': {
-                    'entities': [{'sn': sn} for sn in sns],
+                    'total': len(sns),
+                    'succeeded': len(sns),
+                    'failed': 0,
+                    'skipped': 0,
+                    'partial': False,
                     'synced': len(sns),
+                    'results': [
+                        {'sn': sn, 'ok': True, 'skipped': False} for sn in sns
+                    ],
                 }
             }
 
@@ -85,10 +92,22 @@ def device_api(monkeypatch):
             calls['sync_config'] = sns
             return {
                 'data': {
-                    'entities': [{'sn': sn} for sn in sns],
+                    'total': len(sns),
+                    'succeeded': len(sns),
+                    'failed': 0,
+                    'skipped': 0,
+                    'partial': False,
                     'synced': len(sns),
+                    'results': [
+                        {'sn': sn, 'ok': True, 'skipped': False} for sn in sns
+                    ],
                 }
             }
+
+        @staticmethod
+        def update_status(payload):
+            calls['update_status'] = payload
+            return {'code': 200}
 
         @staticmethod
         def start_recording(device_code, audio_id=None):
@@ -122,13 +141,24 @@ def device_api(monkeypatch):
             calls['get_command_log'] = (device_code, message_id)
             return {
                 'data': {
-                    'sn': device_code,
-                    'cmd': 'start/shadow',
-                    'msg_id': message_id,
-                    'status': 1,
-                    'req_time': '2025-11-01T10:00:00',
-                    'resp_time': '2025-11-01T10:00:02',
-                    'response': {'ok': True},
+                    'remote': {
+                        'sn': device_code,
+                        'cmd': 'start/shadow',
+                        'msg_id': message_id,
+                        'status': 1,
+                        'req_time': '2025-11-01T10:00:00',
+                        'resp_time': '2025-11-01T10:00:02',
+                        'response': {'ok': True},
+                    },
+                    'remote_error': None,
+                    'local': {
+                        'device_code': device_code,
+                        'command': 'start_recording',
+                        'msg_id': message_id,
+                        'request_status': 'success',
+                        'remote_status': 0,
+                        'payload_json': '{"sn": "%s"}' % device_code,
+                    },
                 }
             }
 
@@ -150,6 +180,7 @@ def test_list_rows_carry_permission_gated_row_actions(
         '停止录音',
         '指令结果',
         '修改',
+        '状态维护',
         '删除',
     ]
     assert rows[0]['battery_display'] == '40%'
@@ -281,11 +312,29 @@ def test_save_device_success_closes_modal_and_reloads(
 def test_sync_status_partial_failure_is_reported(
     session_context, device_api, dash_ctx, monkeypatch, messages
 ):
-    """契约 C9/E10：后端只回部分设备时，页面必须提示部分失败。"""
+    """契约 §4.6 R2/E10：后端逐台结果里出现失败时，页面必须提示部分失败。"""
     session_context.login(perms=FULL_PERMS)
 
     def partial(sns):
-        return {'data': {'entities': [{'sn': sns[0]}], 'synced': 1}}
+        return {
+            'data': {
+                'total': 2,
+                'succeeded': 1,
+                'failed': 1,
+                'skipped': 0,
+                'partial': True,
+                'synced': 1,
+                'results': [
+                    {'sn': 'A', 'ok': True, 'skipped': False},
+                    {
+                        'sn': 'B',
+                        'ok': False,
+                        'skipped': False,
+                        'error': '厂商未返回该设备',
+                    },
+                ],
+            }
+        }
 
     monkeypatch.setattr(
         manage_c.DeviceApi, 'sync_status', staticmethod(partial)
@@ -459,26 +508,20 @@ def test_open_command_modal_prefills_selected_device(
     assert (visible, device_code, msg_id) == (True, 'MLR1', None)
 
 
-def test_query_command_result_combines_vendor_and_local_log(
-    session_context, device_api, messages
+def test_query_command_result_consumes_backend_merged_payload(
+    session_context, device_api
 ):
-    """契约 E5/C8：用 msg_id 串起本地控制日志与厂商指令回执。"""
+    """契约 §4.7：直接消费 `{remote, remote_error, local}`，前端不再拼两份数据。"""
     session_context.login(perms=FULL_PERMS)
     result = manage_c.query_command_result(1, 'MLR1', 'm-1')
-    visible, alert_type, alert_text, values, rows = (
-        result[4],
-        result[2],
-        result[1],
-        {item['label']: item['children'] for item in result[5]},
-        result[6],
-    )
-    assert visible is True
-    assert alert_type == 'info'
-    assert '成功' in alert_text
+    values = {item['label']: item['children'] for item in result[5]}
+    assert result[4] is True
+    assert result[2] == 'info'
+    assert '成功' in result[1]
     assert values['厂商状态'] == '成功'
     assert values['本地受理结果'] == '已受理'
-    assert rows[0]['command_display'] == '开启录音'
-    assert device_api['list_control_logs']['msg_id'] == 'm-1'
+    # 已给出 msg_id 时不应再查控制日志列表
+    assert 'list_control_logs' not in device_api
 
 
 def test_query_command_result_falls_back_to_latest_local_msg_id(
@@ -493,47 +536,36 @@ def test_query_command_result_falls_back_to_latest_local_msg_id(
     assert 'msg_id' not in device_api['list_control_logs']
 
 
-def test_query_command_result_without_control_log_permission(
+def test_query_command_result_without_msg_id_or_permission(
     session_context, device_api, messages
 ):
-    """无 ``device:control:list`` 时不查本地日志，只展示厂商回执并提示。"""
+    """无 ``device:control:list`` 且未填 msg_id 时，提示手工填写而不是报错。"""
     session_context.login(perms=['device:manage:control'])
-    result = manage_c.query_command_result(1, 'MLR1', 'm-1')
-    assert result[4] is True
+    result = manage_c.query_command_result(1, 'MLR1', None)
+    assert result[4] is False
+    assert result[2] == 'warning'
     assert 'list_control_logs' not in device_api
-    assert messages()[-1]['type'] == 'warning'
-    assert '无控制日志查询权限' in messages()[-1]['content']
+    assert '请填写 msg_id' in result[1]
 
 
-def test_query_command_result_reports_missing_result(
+def test_query_command_result_reports_error_when_backend_fails(
     session_context, device_api, monkeypatch, messages
 ):
     session_context.login(perms=FULL_PERMS)
 
     def not_found(_device_code, _msg_id):
-        raise ServiceException(message='Not found')
+        raise ServiceException(message='指令接收日志不存在')
 
     monkeypatch.setattr(
         manage_c.DeviceApi, 'get_command_log', staticmethod(not_found)
     )
-    monkeypatch.setattr(
-        manage_c.DeviceApi,
-        'list_control_logs',
-        staticmethod(
-            lambda _query: {
-                'rows': [],
-                'page_num': 1,
-                'page_size': 5,
-                'total': 0,
-            }
-        ),
-    )
     result = manage_c.query_command_result(1, 'MLR1', 'm-404')
     assert result[4] is False
     assert result[2] == 'error'
+    assert '指令接收日志不存在' in result[1]
 
 
-def test_query_command_result_no_local_log_and_no_msg_id(
+def test_query_command_result_warns_when_no_local_log_and_no_msg_id(
     session_context, device_api, monkeypatch
 ):
     session_context.login(perms=FULL_PERMS)
@@ -552,3 +584,81 @@ def test_query_command_result_no_local_log_and_no_msg_id(
     result = manage_c.query_command_result(1, 'MLR1', None)
     assert result[4] is False
     assert result[2] == 'warning'
+    assert '暂无本地控制日志' in result[1]
+
+
+def test_open_status_modal_prefills_current_status(session_context, device_api):
+    visible, device_code, status, bind_status = manage_c.open_status_modal(
+        1,
+        '状态维护',
+        {'device_code': 'MLR1', 'status': 'online', 'bind_status': 'bound'},
+    )
+    assert (visible, device_code, status, bind_status) == (
+        True,
+        'MLR1',
+        'online',
+        'bound',
+    )
+
+
+def test_open_status_modal_requires_status_button(session_context, device_api):
+    with pytest.raises(PreventUpdate):
+        manage_c.open_status_modal(1, '详情', {'device_code': 'MLR1'})
+
+
+def test_save_device_status_only_sends_changed_fields(
+    session_context, device_api, messages
+):
+    """契约 §4.7：只提交被选择的字段，device_id 由列表数据回查。"""
+    session_context.login(perms=FULL_PERMS)
+    result = manage_c.save_device_status(
+        1, 'MLR1', 'disabled', None, [{'key': '12', 'device_code': 'MLR1'}]
+    )
+    assert result['ok'] is True
+    assert device_api['update_status'] == {
+        'device_id': 12,
+        'status': 'disabled',
+    }
+    assert messages()[-1]['content'] == '设备状态已更新'
+
+
+def test_save_device_status_requires_an_actual_change(
+    session_context, device_api, messages
+):
+    session_context.login(perms=FULL_PERMS)
+    result = manage_c.save_device_status(
+        1, 'MLR1', None, None, [{'key': '12', 'device_code': 'MLR1'}]
+    )
+    assert result['ok'] is False
+    assert 'update_status' not in device_api
+    assert '需要有改动' in messages()[-1]['content']
+
+
+def test_save_device_status_reports_backend_error(
+    session_context, device_api, monkeypatch, messages
+):
+    session_context.login(perms=FULL_PERMS)
+
+    def denied(_payload):
+        raise ServiceException(message='该用户无此接口权限')
+
+    monkeypatch.setattr(
+        manage_c.DeviceApi, 'update_status', staticmethod(denied)
+    )
+    result = manage_c.save_device_status(
+        1, 'MLR1', 'online', None, [{'key': '12', 'device_code': 'MLR1'}]
+    )
+    assert result['ok'] is False
+    assert '无此操作权限' in messages()[-1]['content']
+
+
+def test_save_device_status_requires_matching_row(
+    session_context, device_api, messages
+):
+    session_context.login(perms=FULL_PERMS)
+    result = manage_c.save_device_status(
+        1, 'MLR-UNKNOWN', 'online', None, [{'key': '12', 'device_code': 'MLR1'}]
+    )
+    assert result['ok'] is False
+    assert 'update_status' not in device_api
+    assert '未在列表中匹配到该设备' in messages()[-1]['content']

@@ -136,9 +136,15 @@ def test_device_page_renders_all_controls_with_full_permissions(
         '刷新',
     ):
         assert label in buttons, f'缺少按钮：{label}'
-    # 详情 / 指令结果 / 停止录音确认弹窗都必须挂载在页面上。
+    # 详情 / 指令结果 / 状态维护 / 停止录音确认弹窗都必须挂载在页面上。
     modals = collect_type_texts(page, 'AntdModal')
-    for title in ('设备详情', '指令结果查询', '指令结果', '停止录音确认'):
+    for title in (
+        '设备详情',
+        '指令结果查询',
+        '指令结果',
+        '状态维护',
+        '停止录音确认',
+    ):
         assert title in modals, f'缺少弹窗：{title}'
 
 
