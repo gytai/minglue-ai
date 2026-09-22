@@ -1,0 +1,271 @@
+import feffery_antd_components as fac
+from dash import dcc, html
+
+from callbacks.device_c import manage_c
+from utils.permission_util import PermissionManager
+
+
+STATUS_OPTIONS = [
+    {'label': '在线', 'value': 'online'},
+    {'label': '离线', 'value': 'offline'},
+    {'label': '已停用', 'value': 'disabled'},
+]
+BIND_OPTIONS = [
+    {'label': '已绑定', 'value': 'bound'},
+    {'label': '未绑定', 'value': 'unbound'},
+]
+
+
+def render(*args, **kwargs):
+    table_data, table_pagination = manage_c.generate_device_table(
+        {'page_num': 1, 'page_size': 10}
+    )
+    return [
+        dcc.Store(id='device-operations-store'),
+        dcc.Store(id='device-modal-type-store'),
+        dcc.Store(id='device-form-store'),
+        dcc.Store(id='device-delete-ids-store'),
+        fac.AntdRow(
+            fac.AntdCol(
+                [
+                    fac.AntdForm(
+                        fac.AntdSpace(
+                            [
+                                fac.AntdFormItem(
+                                    fac.AntdInput(
+                                        id='device-code-search',
+                                        placeholder='设备编码/SN',
+                                        allowClear=True,
+                                        style={'width': 190},
+                                    ),
+                                    label='设备编码',
+                                ),
+                                fac.AntdFormItem(
+                                    fac.AntdInput(
+                                        id='device-name-search',
+                                        placeholder='设备名称',
+                                        allowClear=True,
+                                        style={'width': 180},
+                                    ),
+                                    label='设备名称',
+                                ),
+                                fac.AntdFormItem(
+                                    fac.AntdSelect(
+                                        id='device-status-search',
+                                        options=STATUS_OPTIONS,
+                                        placeholder='全部状态',
+                                        allowClear=True,
+                                        style={'width': 140},
+                                    ),
+                                    label='状态',
+                                ),
+                                fac.AntdFormItem(
+                                    fac.AntdButton(
+                                        '搜索',
+                                        id='device-search',
+                                        type='primary',
+                                        icon=fac.AntdIcon(icon='antd-search'),
+                                    )
+                                ),
+                                fac.AntdFormItem(
+                                    fac.AntdButton(
+                                        '重置',
+                                        id='device-reset',
+                                        icon=fac.AntdIcon(icon='antd-sync'),
+                                    )
+                                ),
+                            ]
+                        ),
+                        layout='inline',
+                    ),
+                    fac.AntdSpace(
+                        [
+                            fac.AntdButton(
+                                '新增设备',
+                                id={
+                                    'type': 'device-operation-button',
+                                    'index': 'add',
+                                },
+                                icon=fac.AntdIcon(icon='antd-plus'),
+                                type='primary',
+                            )
+                            if PermissionManager.check_perms(
+                                'device:manage:add'
+                            )
+                            else [],
+                            fac.AntdButton(
+                                '修改',
+                                id={
+                                    'type': 'device-operation-button',
+                                    'index': 'edit',
+                                },
+                                icon=fac.AntdIcon(icon='antd-edit'),
+                                disabled=True,
+                            )
+                            if PermissionManager.check_perms(
+                                'device:manage:edit'
+                            )
+                            else [],
+                            fac.AntdButton(
+                                '删除',
+                                id={
+                                    'type': 'device-operation-button',
+                                    'index': 'delete',
+                                },
+                                icon=fac.AntdIcon(icon='antd-delete'),
+                                danger=True,
+                                disabled=True,
+                            )
+                            if PermissionManager.check_perms(
+                                'device:manage:remove'
+                            )
+                            else [],
+                            fac.AntdButton(
+                                '刷新',
+                                id='device-refresh',
+                                icon=fac.AntdIcon(icon='antd-sync'),
+                            ),
+                        ],
+                        style={'paddingBottom': '12px'},
+                    ),
+                    fac.AntdSpin(
+                        fac.AntdTable(
+                            id='device-list-table',
+                            data=table_data,
+                            columns=[
+                                {
+                                    'title': '设备编码',
+                                    'dataIndex': 'device_code',
+                                },
+                                {
+                                    'title': '设备名称',
+                                    'dataIndex': 'device_name',
+                                },
+                                {'title': '型号', 'dataIndex': 'model'},
+                                {
+                                    'title': '固件',
+                                    'dataIndex': 'firmware_version',
+                                },
+                                {'title': '在线状态', 'dataIndex': 'status'},
+                                {
+                                    'title': '绑定状态',
+                                    'dataIndex': 'bind_status',
+                                },
+                                {'title': '使用人', 'dataIndex': 'owner_name'},
+                                {
+                                    'title': '电量',
+                                    'dataIndex': 'battery_display',
+                                },
+                                {
+                                    'title': '最后在线',
+                                    'dataIndex': 'last_seen_time',
+                                    'width': 170,
+                                },
+                                {
+                                    'title': '操作',
+                                    'dataIndex': 'operation',
+                                    'width': 160,
+                                    'renderOptions': {'renderType': 'button'},
+                                },
+                            ],
+                            rowSelectionType='checkbox',
+                            rowSelectionWidth=50,
+                            bordered=True,
+                            pagination=table_pagination,
+                            mode='server-side',
+                            style={'width': '100%'},
+                        ),
+                        text='设备数据加载中',
+                    ),
+                ],
+                span=24,
+            ),
+            gutter=8,
+        ),
+        fac.AntdModal(
+            fac.AntdForm(
+                [
+                    fac.AntdFormItem(
+                        fac.AntdInput(
+                            name='device_code',
+                            placeholder='请输入设备唯一编码/SN',
+                            allowClear=True,
+                        ),
+                        label='设备编码',
+                        required=True,
+                        id={
+                            'type': 'device-form-label',
+                            'index': 'device_code',
+                            'required': True,
+                        },
+                        hasFeedback=True,
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='device_name', allowClear=True),
+                        label='设备名称',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='model', allowClear=True),
+                        label='设备型号',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='firmware_version', allowClear=True),
+                        label='固件版本',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdSelect(name='status', options=STATUS_OPTIONS),
+                        label='在线状态',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdSelect(
+                            name='bind_status', options=BIND_OPTIONS
+                        ),
+                        label='绑定状态',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='owner_name', allowClear=True),
+                        label='使用人',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='owner_phone', allowClear=True),
+                        label='手机号',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='department', allowClear=True),
+                        label='所属部门',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInputNumber(
+                            name='battery_level',
+                            min=0,
+                            max=100,
+                            style={'width': '100%'},
+                        ),
+                        label='电量(%)',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(name='remark', mode='text-area'),
+                        label='备注',
+                    ),
+                ],
+                id='device-form',
+                enableBatchControl=True,
+                labelCol={'span': 6},
+                wrapperCol={'span': 18},
+            ),
+            id='device-modal',
+            width=620,
+            mask=False,
+            renderFooter=True,
+            okClickClose=False,
+        ),
+        fac.AntdModal(
+            fac.AntdText('是否确认删除？', id='device-delete-text'),
+            id='device-delete-confirm-modal',
+            visible=False,
+            title='提示',
+            renderFooter=True,
+            centered=True,
+        ),
+        html.Div(),
+    ]
