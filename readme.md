@@ -2,6 +2,12 @@
 
 基于 [Dash-FastAPI-Admin](https://github.com/gytai/Dash-FastAPI-Admin) 二次开发的明略硬件设备管理系统。后端采用 FastAPI + SQLAlchemy，管理端采用 Dash + feffery-antd-components。
 
+## 契约与差距基线
+
+厂商接口契约盘点与现状差距分析见 [`docs/minglue-contract-and-gap-analysis.md`](docs/minglue-contract-and-gap-analysis.md)。该文档是后续所有阶段的契约基线，记录了 4 篇厂商说明、6 个厂商接口、8 类回调的字段字典，以及逐项差距矩阵与 P0/P1/P2 排序。
+
+后续开发前请先阅读该文档的 §5.8（优先级汇总）与 §6（仍需真实环境确认的事项）。
+
 ## 已实现功能
 
 - 设备台账：设备新增、编辑、删除、搜索和分页查询。
@@ -24,7 +30,7 @@ POST /open/minglue/callback/{event_type}
 Content-Type: application/json
 ```
 
-回调接入已按厂商文档适配 `rec`、`op`、`sys`、`reclist`、`log`、`fc`、`asr` 和设备心跳，成功响应严格为 `{"code": 0}`。同时保留兼容模式，支持从顶层、`content` 列表或 `data`、`body`、`payload`、`device` 对象中识别以下字段：
+回调接收已覆盖 `rec`、`op`、`sys`、`reclist`、`log`、`fc`、`asr` 和设备心跳，成功响应为 `{"code": 0}`。**注意**：其中 `upload`（`logType` 为 `log`/`rec`、无顶层 `type`）的类型归一化、幂等键策略与处理失败时的原始报文留存仍为待办，详见契约文档 §5.3 的 B6/B11/B12。同时保留兼容模式，支持从顶层、`content` 列表或 `data`、`body`、`payload`、`device` 对象中识别以下字段：
 
 | 语义 | 兼容字段 |
 | --- | --- |
