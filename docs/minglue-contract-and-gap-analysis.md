@@ -1,6 +1,6 @@
 # 明略 AIOT 接口契约盘点与现状差距分析
 
-- **文档版本**：v1.2
+- **文档版本**：v1.3
 - **文档更新时间**：2026-09-22
 - **对应 issue**：GYTAI-127（明略后台 1/6：接口规范盘点与现状差距分析）
 - **契约基线提交**：`agent/codex/gytai-123` 的 `3626af6` / `27ed2e8` / `18c2a91`
@@ -8,6 +8,15 @@
 - **适用阶段**：Stage 2 ~ Stage 6 均以本文档为契约基线；后续阶段发现契约偏差时，必须回到 Apifox 原文核对并更新本文档
 
 > 说明：本文档只记录契约事实与差距结论，**不包含 Apifox 访问密码、厂商账号或厂商 AES 密钥**。密码仅用于抓取时访问，未写入仓库、配置或日志。
+
+> v1.2（Stage 4）说明：厂商设备控制接口（§4）已按契约精确对接，并补齐远端同步
+> 与本地台账的一致性规则（§4.6）与本地设备管理接口清单（§4.7）。
+> §5.3 回调侧结论仍以 Stage 2 为准；Stage 3 未交付（见 §9 遗留说明）。
+
+> v1.3（Stage 5）说明：管理端页面已按 §4.6/§4.7 的接口语义重做——批量同步的
+> 部分失败提示改用后端逐台 `results`/`partial`，指令结果查询直接消费
+> `{remote, remote_error, local}`，并新增"状态维护"走 `PUT /device/status`。
+> §5.6 前端矩阵与 §5.7 F8 已更新。
 
 ---
 
@@ -494,6 +503,50 @@ BODY: { "code": 0 }
 | `sn` | string | 设备序列号 |
 | `status` | int | 0: 初始化；1: 成功；2: 返回出错；3: 返回超时 |
 
+### 4.6 远端同步与本地台账的一致性规则（Stage 4 定稿）
+
+厂商 AIOT 侧没有设备列表接口，**本地台账是唯一可查询的设备主数据**（§0.2）。
+因此"远端读"与"本地写"之间必须有确定规则，避免批量操作留下不可解释状态：
+
+| 规则 | 内容 |
+| --- | --- |
+| R1 逐设备独立事务 | 批量状态/配置同步对每台设备使用 savepoint 并单独提交；单台失败只回滚该台，不影响同批其他设备。 |
+| R2 逐台结果可解释 | 响应返回 `results[]`（`sn`/`ok`/`skipped`/`error`）与 `total`/`succeeded`/`failed`/`skipped`/`partial`，前端据此提示"部分失败"。`synced` 字段保留为 `succeeded` 的别名。 |
+| R3 缺项有确定结论 | 请求了但厂商响应未包含的 `sn` 记为 `failed`（错误说明"响应未包含该设备"），不会静默消失。 |
+| R4 状态同步可建档 | 批量**状态**回包按心跳口径 upsert，厂商已知而本地不存在的设备按回调同策略建档（与 §5.5 D1 一致）。 |
+| R5 配置同步不建档 | 批量**配置**回包只更新本地已存在的设备；本地没有该设备时记为 `skipped`，不凭配置回包凭空创造没有主数据的台账记录。 |
+| R6 本地状态不被覆盖 | 本地 `disabled` 停用设备不会被回调或状态同步改回在线（`_upsert_device` 保留停用态）。 |
+| R7 配置结构不猜 | `config_data` 结构未定义（U3），按原样 JSON 落 `config_json`，不做字段级校验。 |
+
+### 4.7 本地设备管理接口（Stage 4 补齐）
+
+本地接口沿用 Dash-FastAPI-Admin 的登录态与按钮权限（`CheckUserInterfaceAuth`），
+响应统一为 `{code, msg, data}`：
+
+| 方法 | 路径 | 权限码 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/device/list` | `device:manage:list` | 分页/筛选（编码、名称、型号、本地状态、心跳三态 `online_status`、绑定状态、使用人） |
+| GET | `/device/detail/{device_id}` | `device:manage:query` | 设备详情（含完整心跳字段与配置快照） |
+| POST | `/device` | `device:manage:add` | 新增设备；`device_code` 唯一 |
+| PUT | `/device` | `device:manage:edit` | 编辑设备；编码冲突校验排除自身 |
+| PUT | `/device/status` | `device:manage:edit` | **状态字段维护**：仅改 `status`（online/offline/disabled）与 `bind_status`（bound/unbound），至少传一项 |
+| DELETE | `/device/{device_ids}` | `device:manage:remove` | 删除（逗号分隔主键） |
+| POST | `/device/remote/status` | `device:manage:control` | 批量设备状态同步，返回 §4.6 R2 的逐台结果 |
+| POST | `/device/remote/config` | `device:manage:control` | 批量配置状态同步，返回 §4.6 R2 的逐台结果 |
+| POST | `/device/remote/offline-sweep` | `device:manage:control` | 心跳超时（>5 分钟）离线兜底 |
+| POST | `/device/{device_code}/recording/start` | `device:manage:control` | 开启录音；`audio_id` 受 `^[a-z0-9]{2,10}$` 约束 |
+| POST | `/device/{device_code}/recording/stop` | `device:manage:control` | 停止录音 |
+| GET | `/device/{device_code}/command/{message_id}` | `device:manage:control` | 指令结果查询，返回 `{remote, remote_error, local}` |
+| GET | `/device/callback/list` | `device:callback:list` | 回调日志分页（类型/设备/处理结果/重复标记/时间） |
+| GET | `/device/callback/{callback_id}` | `device:callback:query` | 回调详情（原始报文） |
+| DELETE | `/device/callback/{callback_ids}` | `device:callback:remove` | 删除回调日志 |
+| GET | `/device/recording/list` | `device:recording:list` | 录音/转码/ASR 产物分页 |
+| GET | `/device/control/list` | `device:control:list` | 控制指令日志分页（含厂商 `msg_id`） |
+
+`GET /device/{device_code}/command/{message_id}` 的语义：厂商侧刚下发指令时可能返回
+`404 记录不存在`，此时本地已留存 `msg_id`（契约 C8），因此把厂商错误放在 `remote_error`
+返回并附本地控制日志；两边都没有记录才判为不存在。
+
 ---
 
 ## 5. 契约 → 现状差距矩阵
@@ -512,8 +565,8 @@ BODY: { "code": 0 }
 | A1 | `POST /thiea/site/accountLogin` 路径与方法 | `minglue_api_service.py:_get_token` 一致 | 已满足 | — |
 | A2 | 密码 AES-128-ECB + PKCS7 + Base64 | `encrypt_password` 一致；已用独立 openssl 复算文档向量 `R5V4MqWkJ4kD/zNcqaxPwQ==` 通过 | 已满足 | — |
 | A3 | `isLock: true` | 固定传 `true` | 已满足 | — |
-| A4 | token 缓存与过期（`expires` 秒） | 进程内缓存 + 提前 60s 刷新；401/403 触发一次强制刷新重试 | 已满足 | — |
-| A5 | 鉴权头形态（`Bearer ` 前缀与否） | 默认 `Bearer`，可用 `MINGLUE_API_AUTH_SCHEME` 置空 | **文档不明确** | P1 |
+| A4 | token 缓存与过期（`expires` 秒） | 进程内缓存 + 提前 60s 刷新；401/403 触发一次强制刷新重试；有请求级测试断言"命中缓存不重复登录"与"401 只重试一次" | 已满足（Stage 4 加固） | — |
+| A5 | 鉴权头形态（`Bearer ` 前缀与否） | 默认 `Bearer`，可用 `MINGLUE_API_AUTH_SCHEME` 置空；两种形态均有请求级测试 | **文档不明确**（已可配置验证） | P1 |
 | A6 | 响应包络 `{code,message,data}`，`code=0` 成功 | `_unwrap` 已处理；400/404 无 `data` 也能正确抛错 | 已满足 | — |
 | A7 | 业务错误码（`code` 非 0 取值表） | 仅透传 `message` | 文档不明确 | P2 |
 
@@ -570,17 +623,17 @@ BODY: { "code": 0 }
 
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
-| C1 | 批量设备状态：路径/方法/Body `{sns}` | `get_device_statuses` 一致 | 已满足 | — |
-| C2 | 批量设备状态：Query `sn` 必填 | 同时发送 query `sn=sns[0]` 与 body `sns` | **文档不明确** | P1 |
-| C3 | 批量配置状态：路径/方法/Body | `get_device_config_statuses` 一致 | 已满足 | — |
-| C4 | 配置状态结果持久化 | 仅原样回传，未写入 `config_json`，`last_upload_time` 无字段承载 | 部分满足 | P1 |
-| C5 | 开启录音：路径 + Query `sn` + Body `nm` | `start_recording` 一致；`nm` 校验 `^[a-z0-9]{2,10}$` 与文档"自定义字段"规则一致 | 已满足 | — |
-| C6 | 停止录音：路径 + Query `sn` + 空 Body | `stop_recording` 一致 | 已满足 | — |
-| C7 | 指令接收日志：路径/方法/Query `sn`+`msg_id` | `get_command_log` 一致 | 已满足 | — |
-| C8 | `msg_id` 回传可用于回查 | 开启/停止录音接口已返回厂商 `msg_id`，但本地未记录该 `msg_id`，无法串联回查 | 部分满足 | P1 |
-| C9 | 批量同步部分失败行为 | 单事务提交，任一设备异常整体回滚，无逐设备结果 | 部分满足 | P1 |
-| C10 | 网络超时 / 401 / 403 / 非法响应错误映射 | 超时、HTTP 错误、JSON 解析失败均转 `ServiceException`；401/403 重试一次 | 已满足 | — |
-| C11 | 不泄露密码/token/敏感报文 | 异常信息只带 `message`/响应前 500 字符，未回显密码与 token | 已满足 | — |
+| C1 | 批量设备状态：路径/方法/Body `{sns}` | 路径/方法/Body 与文档一致，并有请求级测试断言 | 已满足 | — |
+| C2 | 批量设备状态：Query `sn` 必填 | 默认同时发送 query `sn`（=首个序列号）与 body `sns`；可用 `MINGLUE_API_BATCH_SN_QUERY=false` 只发 body，便于真实环境试送 | **文档不明确**（已可配置验证） | P1 |
+| C3 | 批量配置状态：路径/方法/Body | 与文档一致并有请求级测试 | 已满足 | — |
+| C4 | 配置状态结果持久化 | `sync_remote_configs` 逐台写入 `config_json`/`config_last_upload_time`/`config_synced_at`；本地无此设备时跳过而非建档（§4.6 R5） | 已满足（Stage 4） | — |
+| C5 | 开启录音：路径 + Query `sn` + Body `nm` | 与文档一致；`nm` 校验 `^[a-z0-9]{2,10}$`；不带 `nm` 时 body 为空对象 | 已满足 | — |
+| C6 | 停止录音：路径 + Query `sn` + 空 Body | 与文档一致并有请求级测试 | 已满足 | — |
+| C7 | 指令接收日志：路径/方法/Query `sn`+`msg_id` | 与文档一致；`status` 归一为整数，非整数报可读错误 | 已满足 | — |
+| C8 | `msg_id` 回传可用于回查 | 开启/停止录音响应强制要求 `msg_id`（缺失即报错），并写入 `ml_device_control_log.msg_id`；`/device/{code}/command/{msg_id}` 合并厂商与本地结果 | 已满足（Stage 4） | — |
+| C9 | 批量同步部分失败行为 | 逐设备 savepoint + 独立提交，返回逐台 `results` 与 `partial`；缺项序列号补确定结论（§4.6 R1~R3） | 已满足（Stage 4） | — |
+| C10 | 网络超时 / 401 / 403 / 非法响应错误映射 | 超时、网络错误、非 2xx、非法 JSON、非对象包络、缺 `code`、缺 `entities`/`msg_id` 均转可读 `ServiceException`；401/403 强制刷新 token 后**只重试一次**，其余错误不重试 | 已满足（Stage 4） | — |
+| C11 | 不泄露密码/token/敏感报文 | 错误信息不回显请求报文；响应片段先按值抹除 token/密码/AES 密钥，再按形态抹除 JWT 与长 Base64，并截断 200 字符；控制日志不记录 token | 已满足（Stage 4） | — |
 
 ### 5.5 数据模型与 SQL
 
@@ -606,16 +659,16 @@ BODY: { "code": 0 }
 
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
-| E1 | 设备列表（搜索/分页/状态/详情/增删改） | `views/device/manage` + `callbacks/device_c/manage_c.py` 完整；筛选含编码/名称/本地状态/心跳三态/绑定状态，行内含详情、修改、删除 | 已满足 | — |
-| E2 | 设备状态同步入口 | 批量"同步状态"按钮接入 `sync_status`，按请求 SN 与返回 `entities` 求差集提示部分失败 | 已满足 | — |
+| E1 | 设备列表（搜索/分页/状态/详情/增删改） | `views/device/manage` + `callbacks/device_c/manage_c.py` 完整；筛选含编码/名称/本地状态/心跳三态/绑定状态，行内含详情、修改、删除；另提供"状态维护"（`PUT /device/status`，仅在线/绑定两项，受 `device:manage:edit`） | 已满足 | — |
+| E2 | 设备状态同步入口 | 批量"同步状态"按钮接入 `/device/remote/status`，按后端逐台 `results`/`partial` 提示成功/部分失败/全部失败 | 已满足 | — |
 | E3 | 开启/停止录音入口 | "开始录音"直接下发并把厂商 `msg_id` 回显；"停止录音"先二次确认再下发 | 已满足 | — |
-| E4 | 配置状态同步入口 | 新增"同步配置"按钮，接入 `/device/remote/config`，同口径提示部分失败 | 已满足 | — |
-| E5 | 指令结果查询入口 | 新增"指令结果"按钮/弹窗：按设备取最近一条本地控制日志的 `msg_id`（或手工输入），同时展示厂商回执与本地受理日志 | 已满足 | — |
+| E4 | 配置状态同步入口 | 新增"同步配置"按钮，接入 `/device/remote/config`，同口径提示部分失败（含 `skipped`） | 已满足 | — |
+| E5 | 指令结果查询入口 | 新增"指令结果"按钮/弹窗：按设备取最近一条本地控制日志的 `msg_id`（受 `device:control:list`），或手工输入；直接消费 `GET /device/{sn}/command/{msg_id}` 的 `{remote, remote_error, local}` | 已满足 | — |
 | E6 | 完整心跳字段展示 | 列表新增充电状态/心跳在线；详情弹窗按契约 §3 逐字段展示 `charged_status`、`key_status`、`usb_status`、`disk_mount_status`、`chip`、`ip_address`、`today_record_seconds`、`pending_recordings`、`tenant_id`、`audio_id`、`battery_voltage`、`battery_current` 及配置快照 | 已满足 | — |
 | E7 | 回调日志按设备/类型/时间/结果查询 | 支持 `device_code`/`event_type`/`process_status`/`duplicate_flag`/`begin_time`+`end_time`（时间只有一端时不下发） | 已满足 | — |
 | E8 | 回调原始报文格式化查看 | 详情弹窗按"事件信息 / 幂等与处理信息 / 原始报文"三段展示，含 `dedup_key`、重复标记、签名校验、`session_id`、`item_count` | 已满足 | — |
 | E9 | 页面不泄露密钥/token | 报文预览与异常文案统一走 `sanitize_payload` / `mask_secret_text`：敏感键掩码、带签名 URL 只保留参数名 | 已满足 | — |
-| E10 | 加载/部分失败/超时/无权限反馈 | 批量同步按 SN 差集区分成功/部分失败/全部失败；后端异常按无权限/登录失效/超时/业务错误分别给文案；同步与录音操作按钮进入 loading | 已满足 | — |
+| E10 | 加载/部分失败/超时/无权限反馈 | 优先消费后端逐台 `results`（`failed`/`skipped` 明细），无该字段时回退到"请求 SN − 返回 entities"差集；后端异常按无权限/登录失效/超时/业务错误分别给文案；同步与录音操作按钮进入 loading | 已满足 | — |
 | E11 | 危险操作二次确认 | 删除与停止录音均有确认弹窗，未确认不下发 | 已满足 | — |
 | E12 | 菜单/角色/按钮权限两层一致 | 前端按钮判断的权限标识 ⊆ 后端 `CheckUserInterfaceAuth` 守卫；默认普通角色（role_id=2）补齐 `device:manage:control`/`device:recording:list`/`device:control:list`，两套库种子与迁移脚本等价 | 已满足 | — |
 
@@ -623,12 +676,12 @@ BODY: { "code": 0 }
 
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
-| F1 | AES 加密向量测试 | 有，且向量与文档一致（已独立复算） | 已满足 | — |
+| F1 | AES 加密向量测试 | 有，且向量与文档一致（已独立复算）；Stage 4 追加"登录请求体里的密文等于文档向量且明文不出现在请求中"的请求级断言 | 已满足 | — |
 | F2 | 心跳回调字段映射测试 | 有（函数级，mock DAO） | 部分满足 | P1 |
 | F3 | `rec` 多设备与幂等键测试 | 有（函数级，mock DAO） | 部分满足 | P1 |
 | F4 | 请求级回调测试（覆盖 8 类） | **无**；仅覆盖 heartbeat / rec 两类，且均为函数级 smoke test | 缺失 | P1 |
 | F5 | 重复事件 / 缺失字段 / 非法字段 / 签名错误测试 | **无** | 缺失 | P1 |
-| F6 | 厂商接口 mock 测试（token 刷新、错误映射、参数序列化） | **无** | 缺失 | P1 |
+| F6 | 厂商接口 mock 测试（token 刷新、错误映射、参数序列化） | 有（Stage 4）：`httpx.MockTransport` 起 mock 厂商服务，40 个请求级/服务级用例覆盖加密向量、token 缓存与刷新、重试边界、5 个接口的参数位置与包络解包、超时/401/400/404/业务错误/非法响应映射、敏感信息不外泄、本地台账更新与逐台部分失败 | 已满足（Stage 4） | — |
 | F7 | 数据库迁移 / 唯一约束 / 新旧库升级测试 | **无** | 缺失 | P1 |
 | F8 | 前端回调/组件测试 | 已补 66 条：页面纯逻辑、设备管理回调、回调日志回调、页面组件渲染与权限显隐、前后端权限与双库种子的静态一致性（`dash-fastapi-frontend/tests/`，不依赖 dash 运行时） | 已满足 | — |
 | F9 | 测试可在干净环境被收集 | `config/database.py` 改为惰性建引擎；无 MySQL/PG 驱动时仍可收集并跑完 45 个测试 | 已满足（Stage 2） | — |
@@ -662,17 +715,18 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 - B3 心跳 3s 响应时限保护
 - B13/B14 回调签名定位与失败审计
 - B18 事件时间口径不一致（字符串 naive 与 Unix UTC 混用）
-- C2 `sn` query 与 body `sns` 的并存语义
-- C4/D7 配置状态持久化
-- C8 厂商 `msg_id` 本地留存以支持回查
-- C9 批量同步部分失败语义
-- D2/D3 在线状态三态与超时离线兜底
-- D6 录音/转码/ASR 业务模型
-- E4/E5 前端缺失入口 —— **Stage 5 已关闭**（配置同步、指令结果查询入口已接入）
-- E6 心跳字段展示完整性 —— **Stage 5 已关闭**（详情弹窗逐字段展示）
-- E10 部分失败反馈 —— **Stage 5 已关闭**（批量同步按 SN 差集提示，异常分级文案）
-- F4–F7 请求级/服务级/迁移测试
-- F9 测试无法在干净环境被收集（import 期建 async engine）
+- ~~C2 `sn` query 与 body `sns` 的并存语义~~ → Stage 4 已做成可配置开关，仅剩真实环境确认取值
+- ~~C4/D7 配置状态持久化~~ → Stage 4 已落库
+- ~~C8 厂商 `msg_id` 本地留存以支持回查~~ → Stage 4 已留存并串起回查
+- ~~C9 批量同步部分失败语义~~ → Stage 4 已逐台独立事务 + 逐台结果
+- D2/D3 在线状态三态与超时离线兜底（Stage 2 已实现，验收留给 Stage 6）
+- D6 录音/转码/ASR 业务模型（Stage 2 已建模，验收留给 Stage 6）
+- ~~E4/E5 前端缺失入口（配置同步 / 指令结果查询）~~ → Stage 5 已接入
+- ~~E6 心跳字段展示完整性~~ → Stage 5 已在详情弹窗逐字段展示
+- ~~E10 部分失败反馈~~ → Stage 4 返回逐台 `results`/`partial`，Stage 5 据此区分成功/部分失败/全部失败并分级提示
+- F4/F5 请求级回调测试；F7 迁移测试（Stage 2 已补，F4/F5 留给 Stage 3 补齐）
+- ~~F6 厂商接口 mock 测试~~ → Stage 4 已补齐
+- ~~F9 测试无法在干净环境被收集~~ → Stage 2 已修 ORM 侧；Stage 4 另修 `config/env.py` 在 import 期解析 `sys.argv` 导致带参数的 pytest 无法运行的问题
 
 **P2（体验与完备性）**
 
@@ -686,8 +740,8 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 
 | 编号 | 不明确项 | 现有处理 | 待确认方式 |
 | --- | --- | --- | --- |
-| U1 | 鉴权头是否带 `Bearer ` 前缀 | 默认 `Bearer`，可配置为空 | 真实环境调一次 `status/batch` |
-| U2 | 批量接口 `sn` query 与 body `sns` 是否都需要 | 两者都发 | 真实环境分别试送 |
+| U1 | 鉴权头是否带 `Bearer ` 前缀 | 默认 `Bearer`，可用 `MINGLUE_API_AUTH_SCHEME` 置空 | 真实环境调一次 `status/batch`，无需改代码 |
+| U2 | 批量接口 `sn` query 与 body `sns` 是否都需要 | 默认两者都发；`MINGLUE_API_BATCH_SN_QUERY=false` 可只发 body | 真实环境分别试送，无需改代码 |
 | U3 | `config_data` 结构 | 未建模，仅原样回传 | 向厂商索取配置字段定义或取一次真实返回 |
 | U4 | `nm` 类型（表标 int64，示例为字符串） | 按字符串处理 | 真实心跳核对 |
 | U5 | `charged_status` 满电取值（`finished` vs `finish`） | 原样存储，不做枚举校验 | 真实心跳/日志核对 |
@@ -719,9 +773,9 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | --- | --- |
 | Stage 2（数据模型/DAO/迁移） | §2、§3 的完整字段字典；§5.5 的 D1–D10 差距；P0 的 B11/D5 幂等键策略、D6 业务模型、D7 配置字段 |
 | Stage 3（回调精确适配） | §2 的 8 类回调契约；P0 的 B6/B11/B12；U3–U10 待确认项；B13/B14 签名定位 |
-| Stage 4（设备控制对接） | §4 的 5 个接口契约；C2/C4/C8/C9 差距；U1/U2/U9/U11 待确认项 |
-| Stage 5（前端页面） | E1–E11 差距；§3 心跳字段字典用于详情展示 |
-| Stage 6（全链路验收） | §5.8 的 P0/P1/P2 汇总作为验收清单；§6 全部真实环境事项 |
+| Stage 4（设备控制对接） | §4 的 5 个接口契约；C2/C4/C8/C9 差距；U1/U2/U9/U11 待确认项。**Stage 4 交付**：§4.6 一致性规则、§4.7 本地接口清单、C2/C4/C8/C9/C10/C11 关闭、F6 关闭 |
+| Stage 5（前端页面） | E1–E11 差距；§3 心跳字段字典用于详情展示；**新增输入**：§4.7 的本地接口清单（含 `PUT /device/status`、指令结果查询的 `{remote, remote_error, local}` 结构、批量同步的 `partial`/`results` 逐台结果，用于部分失败提示） |
+| Stage 6（全链路验收） | §5.8 的 P0/P1/P2 汇总作为验收清单；§6 全部真实环境事项；**Stage 4 追加**：`config/env.py` 在 pytest 下的 argv 处理、`exceptions/exception.py` 的 message 传递、U1/U2 两种开关取值的真实环境验证 |
 
 ### 7.1 本阶段结论
 
@@ -753,6 +807,51 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 - 仓库内 `utils/common_util.py:16` 存在上游框架自带的 `SyntaxWarning: invalid escape sequence '\ '`，非本阶段引入，Stage 6 可一并清理。
 - 本阶段**未做大规模业务代码改造**，除契约文档与 README 指引外未改动业务逻辑，因此 lint/编译结果与基线一致。
 
+### 8.1 Stage 4 验证结果（GYTAI-124）
+
+| 检查项 | 命令 | 结果 |
+| --- | --- | --- |
+| 测试套件 | `pytest` | ✅ **86 passed**（Stage 2 基线 45 + Stage 4 新增 41） |
+| 测试可用性 | `pytest -q tests/test_minglue_stage4_vendor_api.py` | ✅ 通过；带参数调用 pytest 不再被 `config/env.py` 的 import 期 `argparse` 中断 |
+| 后端 lint | `ruff check module_device/ tests/ config/ exceptions/` | ✅ `All checks passed!` |
+| Python 语法编译 | `compileall -q module_device/ tests/ config/ exceptions/` | ✅ 通过 |
+| 空白/冲突标记 | `git diff --check` | ✅ 通过 |
+| mock 厂商覆盖 | `httpx.MockTransport` 起 mock 服务，按 5 个设备接口断言请求 | ✅ 路径/方法/query/body/鉴权头逐项断言 |
+| 加密向量 | 登录请求体断言 `password == R5V4MqWkJ4kD/zNcqaxPwQ==` 且明文不出现 | ✅ 通过 |
+| token 生命周期 | 缓存命中不重复登录、401 强制刷新只重试一次、连续 401 的报错不含凭据 | ✅ 通过 |
+| 错误映射 | 超时 / 连接失败 / 400 / 404 / `code!=0` / 非 JSON / 非对象 / 缺 `entities` / 缺 `msg_id` | ✅ 均有确定行为与可读错误 |
+| 敏感信息 | 错误信息脱敏断言 + 控制日志不含 token | ✅ 通过 |
+| 本地台账一致性 | 逐台 savepoint 提交、单台失败不影响其他设备、缺项序列号有结论 | ✅ 通过 |
+| 敏感信息扫描 | 全仓搜索 Apifox 密码、分享口令、厂商 token | ✅ 未进入仓库 |
+
+补充说明：
+
+- 本阶段环境未安装运行期依赖 `loguru` 等，未做应用启动级 smoke test；`config/get_db.py` 因此无法在测试中导入，指令回查逻辑下沉到服务层以便测试（见 §4.7）。
+- `exceptions/exception.py` 的 6 个自定义异常原先不向基类传递 `message`，`str(exc)` 恒为空串，导致审计字段 `error_message` 会丢失原因；本阶段修正为 `super().__init__(message)`。
+
+---
+
+## 9. 阶段交接的遗留说明
+
+### 9.1 Stage 3 未交付
+
+本阶段开始时，Stage 3（GYTAI-125：厂商回调接口精确适配）**没有任何交付物**：
+issue 状态为 `in_progress`，无结果评论，仓库中不存在 `agent/codebuddy/gytai-125`
+分支，`git worktree list` 也没有该任务的 worktree，`origin` 上同样没有对应分支。
+
+因此本阶段**未沿用** Stage 3 报告的分支/提交，改为从 Stage 2 已交付的
+`agent/codebuddy/gytai-128` 的 `dcf8486` 继续开发：
+
+- 契约输入来自 Stage 1 已交付的 `agent/codebuddy/gytai-127` 的 `7a6b127`
+  （即本文档 §1–§4），满足本阶段"使用真实参数位置、字段名、鉴权与响应结构"的要求。
+- Stage 3 负责的回调侧内容（B6/B11/B12 已在 Stage 2 关闭，B3/B13/B14/B18 仍未完成）
+  与本阶段交付的设备管理/厂商控制接口**相互独立**，不构成本阶段的实现阻塞；
+  §5.3 的 B3/B13/B14/B18 与 F4/F5 仍为未关闭项，需要在 Stage 3 补做。
+- 若 Stage 3 后续从 `dcf8486` 继续，本阶段分支与它的改动集不重叠（本阶段只动
+  `module_device` 的设备管理与控制侧、`config/env.py`、`exceptions/exception.py`、
+  `.env.dev`/`.env.prod` 的两个开关、`tests/` 与本文档），合并冲突风险低；
+  Stage 5/6 需确认两者都在同一分支上。
+
 ---
 
 ## 附：文档维护约定
@@ -765,4 +864,5 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | --- | --- | --- | --- |
 | v1.0 | 2026-09-22 | CodeBuddy（Stage 1） | 首次盘点：4 篇说明 + 6 个接口契约，8 类回调，差距矩阵与 P0/P1/P2 排序 |
 | v1.1 | 2026-09-22 | CodeBuddy（Stage 2） | 数据模型/DAO/迁移定稿：关闭 B6/B11/B12、D2/D3/D5/D6/D7、F9；新增 `ml_recording_file`、`ml_device_control_log`；新增可重复执行的双库迁移脚本；补 45 个模型/DAO/迁移测试 |
-| v1.2 | 2026-09-22 | CodeBuddy（Stage 5） | 前端页面与权限定稿：关闭 E1–E12、F8；设备页补齐详情/配置同步/录音确认/指令结果，回调页补齐四类筛选与脱敏报文；前端权限判断与后端守卫、双库种子静态对齐；补 66 条前端测试 |
+| v1.2 | 2026-09-22 | CodeBuddy（Stage 4） | 厂商控制接口精确对接：关闭 C2/C4/C8/C9/C10/C11 与 F6；新增 §4.6 远端同步/本地台账一致性规则、§4.7 本地设备管理接口清单；补 40 个 mock 厂商请求级/服务级测试 |
+| v1.3 | 2026-09-22 | CodeBuddy（Stage 5） | 前端页面与权限定稿：关闭 E1–E12、F8；设备页补齐详情/状态维护/配置同步/录音确认/指令结果，回调页补齐四类筛选与脱敏报文，部分失败提示改用后端逐台 `results`；前端权限判断与后端守卫、双库种子静态对齐；补 66 条前端测试 |

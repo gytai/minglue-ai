@@ -14,6 +14,7 @@ from module_device.entity.vo.device_vo import (
     DeleteDeviceModel,
     DeviceModel,
     DevicePageQueryModel,
+    DeviceStatusUpdateModel,
     RecordingPageQueryModel,
 )
 from module_device.service.minglue_api_service import MinglueApiService
@@ -79,26 +80,25 @@ class DeviceService:
 
     @classmethod
     async def sync_remote_statuses(cls, db: AsyncSession, sns: list[str]):
-        result = await MinglueApiService.get_device_statuses(sns)
-        entities = result.get('entities', []) if isinstance(result, dict) else []
-        if not isinstance(entities, list):
-            raise ServiceException(message='批量获取设备状态失败：响应 entities 格式不正确')
-        try:
-            for entity in entities:
-                if isinstance(entity, dict) and entity.get('sn'):
-                    event_time = CallbackService._parse_datetime(entity.get('update_time'))
-                    await CallbackService._upsert_device(
-                        db,
-                        str(entity['sn']),
-                        'heartbeat',
-                        entity,
-                        event_time,
-                    )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-        return {'entities': entities, 'synced': len(entities)}
+        """拉取厂商批量设备状态并写回本地台账。
+
+        一致性规则（契约 §4.6）：
+
+        1. 厂商状态接口是远端**读**，本地只做台账写：逐设备独立 savepoint + 提交，
+           单台失败只回滚该台，不牵连同批其他设备。
+        2. 厂商已知而本地不存在的设备按回调同一策略建档——厂商 AIOT 侧没有设备列表
+           接口，台账只能由回调、心跳与批量状态构建（契约 §0.2）。
+        3. 响应里逐台给出 ``results``，并对"请求了但厂商没回"的序列号补一条确定结果，
+           因此不存在"批量失败后状态不可解释"的情况。
+        """
+        entities = await MinglueApiService.get_device_statuses(sns)
+        return await cls._apply_remote_batch(
+            db,
+            sns,
+            entities,
+            operation='批量获取设备状态',
+            apply_entity=cls._apply_remote_status,
+        )
 
     @classmethod
     async def sync_remote_configs(cls, db: AsyncSession, sns: list[str]):
@@ -106,36 +106,130 @@ class DeviceService:
 
         ``config_data`` 的结构在厂商文档中为未定义的空对象（契约 §4.2 / U3），
         因此按原样 JSON 保存，不做字段级校验，待厂商给出定义后再结构化。
+
+        与状态同步的区别：配置快照**不为未知设备建档**，本地台账还没有该设备时
+        记为 ``skipped``，避免只凭配置回包凭空创造一条没有主数据的设备记录。
         """
-        result = await MinglueApiService.get_device_config_statuses(sns)
-        entities = result.get('entities', []) if isinstance(result, dict) else []
-        if not isinstance(entities, list):
-            raise ServiceException(message='批量获取设备配置状态失败：响应 entities 格式不正确')
-        synced = 0
+        entities = await MinglueApiService.get_device_config_statuses(sns)
+        return await cls._apply_remote_batch(
+            db,
+            sns,
+            entities,
+            operation='批量获取设备配置状态',
+            apply_entity=cls._apply_remote_config,
+        )
+
+    @classmethod
+    async def _apply_remote_batch(
+        cls,
+        db: AsyncSession,
+        sns: list[str],
+        entities: list,
+        *,
+        operation: str,
+        apply_entity,
+    ) -> Dict[str, Any]:
+        """逐设备应用远端结果，返回可解释的逐台结果与汇总。
+
+        - ``skipped``：厂商回了但本地按规则不处理（缺 sn / 台账无此设备）。
+        - ``failed``：处理抛错，或请求的 sn 未出现在厂商响应里。
+        - ``partial``：同一批里既有成功又有失败，前端据此提示"部分失败"。
+        """
+        normalized = MinglueApiService._require_sns(sns)
+        results: list[Dict[str, Any]] = []
+        succeeded = skipped = failed = 0
+        for entity in entities:
+            device_code = str(entity.get('sn')).strip() if isinstance(entity, dict) and entity.get('sn') else ''
+            if not device_code:
+                skipped += 1
+                results.append({'sn': None, 'ok': False, 'skipped': True, 'error': '厂商响应实体缺少 sn'})
+                continue
+            try:
+                # 每台设备一个 savepoint：单台失败只回滚该台，其余设备照常提交。
+                async with db.begin_nested():
+                    outcome = await apply_entity(db, entity, device_code)
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                failed += 1
+                results.append({'sn': device_code, 'ok': False, 'skipped': False, 'error': str(exc)[:500]})
+                continue
+            if outcome == 'skipped':
+                skipped += 1
+                results.append({'sn': device_code, 'ok': False, 'skipped': True, 'error': '本地台账中不存在该设备'})
+            else:
+                succeeded += 1
+                results.append({'sn': device_code, 'ok': True, 'skipped': False})
+        returned = {item['sn'] for item in results if item.get('sn')}
+        for sn in normalized:
+            if sn not in returned:
+                failed += 1
+                results.append({'sn': sn, 'ok': False, 'skipped': False, 'error': f'{operation}响应未包含该设备'})
+        return {
+            'total': len(normalized),
+            'succeeded': succeeded,
+            'failed': failed,
+            'skipped': skipped,
+            # 保持既有字段名：前端按"已同步 N 台"展示。
+            'synced': succeeded,
+            'partial': succeeded > 0 and failed > 0,
+            'entities': entities,
+            'results': results,
+        }
+
+    @classmethod
+    async def _apply_remote_status(cls, db: AsyncSession, entity: Dict[str, Any], device_code: str) -> str:
+        """把一条批量状态回包按心跳口径写入本地台账（未知设备按回调策略建档）。"""
+        if not isinstance(entity, dict):
+            return 'skipped'
+        event_time = CallbackService._parse_datetime(entity.get('update_time'))
+        await CallbackService._upsert_device(db, device_code, 'heartbeat', entity, event_time)
+        return 'applied'
+
+    @classmethod
+    async def _apply_remote_config(cls, db: AsyncSession, entity: Dict[str, Any], device_code: str) -> str:
+        """把一条配置状态回包写入本地台账；本地无此设备时跳过（不凭空建档）。"""
+        if not isinstance(entity, dict):
+            return 'skipped'
+        device = await DeviceDao.get_by_code(db, device_code)
+        if not device:
+            return 'skipped'
+        await DeviceDao.update(
+            db,
+            {
+                'device_id': device.device_id,
+                'config_json': json.dumps(entity.get('config_data'), ensure_ascii=False, default=str),
+                'config_last_upload_time': CallbackService._parse_datetime(entity.get('last_upload_time')),
+                'config_synced_at': datetime.now(),
+                'update_time': datetime.now(),
+            },
+        )
+        return 'applied'
+
+    @classmethod
+    async def update_status(
+        cls, db: AsyncSession, command: DeviceStatusUpdateModel, operator: str = ''
+    ) -> CrudResponseModel:
+        """维护本地状态字段（在线/绑定），供人工纠正厂商回包之外的状态。"""
+        device = await DeviceDao.get_by_id(db, command.device_id)
+        if not device:
+            raise ServiceException(message='设备不存在')
+        # 显式传 null 不应当把非空状态列清空，因此丢弃 None 值。
+        values = {
+            key: value
+            for key, value in command.model_dump(exclude_unset=True, exclude={'device_id'}).items()
+            if value is not None
+        }
+        if not values:
+            raise ServiceException(message='请至少指定一个要维护的状态字段')
+        values.update(device_id=device.device_id, update_by=operator, update_time=datetime.now())
         try:
-            for entity in entities:
-                if not isinstance(entity, dict) or not entity.get('sn'):
-                    continue
-                device_code = str(entity['sn'])
-                device = await DeviceDao.get_by_code(db, device_code)
-                if not device:
-                    continue
-                await DeviceDao.update(
-                    db,
-                    {
-                        'device_id': device.device_id,
-                        'config_json': json.dumps(entity.get('config_data'), ensure_ascii=False, default=str),
-                        'config_last_upload_time': CallbackService._parse_datetime(entity.get('last_upload_time')),
-                        'config_synced_at': datetime.now(),
-                        'update_time': datetime.now(),
-                    },
-                )
-                synced += 1
+            await DeviceDao.update(db, values)
             await db.commit()
         except Exception:
             await db.rollback()
             raise
-        return {'entities': entities, 'synced': synced}
+        return CrudResponseModel(is_success=True, message='设备状态已更新')
 
     @classmethod
     async def mark_stale_devices_offline(
@@ -881,9 +975,53 @@ class ControlLogService:
     async def get_list(cls, db: AsyncSession, query: ControlLogPageQueryModel):
         return await ControlLogDao.get_list(db, query)
 
+    #: 对外返回的控制日志字段；`payload_json`/`response_json` 只含 sn/nm/msg_id/stat，
+    #: 不含 token 或凭证（契约 C11）。
+    RESPONSE_FIELDS = (
+        'control_id',
+        'device_code',
+        'command',
+        'audio_id',
+        'msg_id',
+        'request_status',
+        'remote_status',
+        'error_message',
+        'operator',
+        'request_ip',
+        'payload_json',
+        'response_json',
+        'create_time',
+        'update_time',
+    )
+
     @classmethod
-    async def get_by_msg_id(cls, db: AsyncSession, msg_id: str):
+    async def find_by_msg_id(cls, db: AsyncSession, msg_id: str) -> Optional[Dict[str, Any]]:
+        """按厂商 ``msg_id`` 查本地控制日志；未找到时返回 ``None`` 而不是抛错。
+
+        指令回查允许"厂商还没有接收记录、但本地已经发过指令"的中间态，
+        因此这里保持可选语义，并直接返回可序列化的字典，避免 ORM 实例
+        带着 ``_sa_instance_state`` 进入响应体。
+        """
         record = await ControlLogDao.get_by_msg_id(db, msg_id)
         if not record:
-            raise ServiceException(message='控制日志不存在')
-        return record
+            return None
+        return {field: getattr(record, field) for field in cls.RESPONSE_FIELDS}
+
+    @classmethod
+    async def resolve_command_result(cls, db: AsyncSession, device_code: str, message_id: str) -> Dict[str, Any]:
+        """指令结果查询：合并厂商指令接收日志与本地控制日志（契约 §4.5）。
+
+        刚下发指令时厂商侧常返回 ``记录不存在``（厂商状态 0 初始化）；
+        此时本地已经记录下 ``msg_id``，把它作为 ``local`` 返回并保留
+        ``remote_error``，比整体报错更有用。两边都没有记录才判定为不存在。
+        """
+        remote = None
+        remote_error = None
+        try:
+            remote = await MinglueApiService.get_command_log(device_code, message_id)
+        except ServiceException as exc:
+            remote_error = exc.message
+        local = await cls.find_by_msg_id(db, message_id)
+        if remote is None and local is None:
+            raise ServiceException(message=remote_error or '指令接收日志不存在')
+        return {'remote': remote, 'remote_error': remote_error, 'local': local}

@@ -4,6 +4,9 @@ class LoginException(Exception):
     """
 
     def __init__(self, data: str = None, message: str = None):
+        # 把 message 交给基类保存：否则 str(exc) 永远是空串，
+        # 审计日志里的 str(error) 会丢掉厂商/业务错误原因。
+        super().__init__(message)
         self.data = data
         self.message = message
 
@@ -14,6 +17,9 @@ class AuthException(Exception):
     """
 
     def __init__(self, data: str = None, message: str = None):
+        # 把 message 交给基类保存：否则 str(exc) 永远是空串，
+        # 审计日志里的 str(error) 会丢掉厂商/业务错误原因。
+        super().__init__(message)
         self.data = data
         self.message = message
 
@@ -24,6 +30,9 @@ class PermissionException(Exception):
     """
 
     def __init__(self, data: str = None, message: str = None):
+        # 把 message 交给基类保存：否则 str(exc) 永远是空串，
+        # 审计日志里的 str(error) 会丢掉厂商/业务错误原因。
+        super().__init__(message)
         self.data = data
         self.message = message
 
@@ -34,6 +43,9 @@ class ServiceException(Exception):
     """
 
     def __init__(self, data: str = None, message: str = None):
+        # 把 message 交给基类保存：否则 str(exc) 永远是空串，
+        # 审计日志里的 str(error) 会丢掉厂商/业务错误原因。
+        super().__init__(message)
         self.data = data
         self.message = message
 
@@ -44,6 +56,9 @@ class ServiceWarning(Exception):
     """
 
     def __init__(self, data: str = None, message: str = None):
+        # 把 message 交给基类保存：否则 str(exc) 永远是空串，
+        # 审计日志里的 str(error) 会丢掉厂商/业务错误原因。
+        super().__init__(message)
         self.data = data
         self.message = message
 
@@ -54,5 +69,8 @@ class ModelValidatorException(Exception):
     """
 
     def __init__(self, data: str = None, message: str = None):
+        # 把 message 交给基类保存：否则 str(exc) 永远是空串，
+        # 审计日志里的 str(error) 会丢掉厂商/业务错误原因。
+        super().__init__(message)
         self.data = data
         self.message = message

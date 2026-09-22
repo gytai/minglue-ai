@@ -175,6 +175,10 @@ class GetConfig:
         if 'uvicorn' in sys.argv[0]:
             # 使用uvicorn启动时，命令行参数需要按照uvicorn的文档进行配置，无法自定义参数
             pass
+        elif 'pytest' in sys.argv[0]:
+            # 测试进程的 argv 属于 pytest（如 -q / 路径等），不能用本应用的解析器解析；
+            # 否则只要带任何 pytest 参数就会在 import 期 argparse 退出，测试无法运行。
+            os.environ.setdefault('APP_ENV', 'dev')
         else:
             # 使用argparse定义命令行参数
             parser = argparse.ArgumentParser(description='命令行参数')

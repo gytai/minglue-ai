@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DeviceModel(BaseModel):
@@ -75,8 +75,22 @@ class DeleteDeviceModel(BaseModel):
     device_ids: str = Field(description='设备主键，多个用逗号分隔')
 
 
-class DeviceStatusModel(BaseModel):
-    status: Literal['online', 'offline', 'disabled']
+class DeviceStatusUpdateModel(BaseModel):
+    """本地状态字段维护：只允许改在线状态与绑定状态。
+
+    远端同步（回调 / 批量状态）覆盖的是遥测字段，这里用于人工纠正本地状态，
+    停用（``disabled``）也走这个入口。
+    """
+
+    device_id: int = Field(gt=0, description='设备主键')
+    status: Optional[Literal['online', 'offline', 'disabled']] = Field(default=None, description='本地在线状态')
+    bind_status: Optional[Literal['bound', 'unbound']] = Field(default=None, description='绑定状态')
+
+    @model_validator(mode='after')
+    def require_any_field(self):
+        if self.status is None and self.bind_status is None:
+            raise ValueError('请至少指定 status 或 bind_status')
+        return self
 
 
 class CallbackPageQueryModel(BaseModel):
