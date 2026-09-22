@@ -15,6 +15,7 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from sqlalchemy import BigInteger  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
@@ -53,3 +54,19 @@ async def sqlite_session(sqlite_engine):
     factory = async_sessionmaker(bind=sqlite_engine, expire_on_commit=False)
     async with factory() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+def reset_minglue_client():
+    """隔离明略客户端的进程内状态。
+
+    契约 §5.3 的 token 缓存是类属性，注入的 mock transport 也是类属性；
+    不重置会让"第二次请求复用 token / 未注入 mock"这类断言互相污染。
+    """
+    from module_device.service.minglue_api_service import MinglueApiService  # noqa: E402
+
+    MinglueApiService.reset_token_cache()
+    MinglueApiService._transport = None
+    yield
+    MinglueApiService.reset_token_cache()
+    MinglueApiService._transport = None

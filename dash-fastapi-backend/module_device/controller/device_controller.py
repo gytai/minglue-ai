@@ -21,6 +21,7 @@ from module_device.entity.vo.device_vo import (
     DeviceBatchModel,
     DeviceModel,
     DevicePageQueryModel,
+    DeviceStatusUpdateModel,
     RecordingPageQueryModel,
     StartRecordingModel,
 )
@@ -85,6 +86,19 @@ async def edit_device(
 @Log(title='设备管理', business_type=BusinessType.DELETE)
 async def delete_device(request: Request, device_ids: str, query_db: AsyncSession = Depends(get_db)):
     result = await DeviceService.delete(query_db, DeleteDeviceModel(device_ids=device_ids))
+    return ResponseUtil.success(msg=result.message)
+
+
+@deviceController.put('/status', dependencies=[Depends(CheckUserInterfaceAuth('device:manage:edit'))])
+@Log(title='设备状态维护', business_type=BusinessType.UPDATE)
+async def update_device_status(
+    request: Request,
+    command: DeviceStatusUpdateModel,
+    query_db: AsyncSession = Depends(get_db),
+    current_user: CurrentUserModel = Depends(LoginService.get_current_user),
+):
+    """维护本地状态字段（在线/绑定）；远端同步只覆盖遥测字段。"""
+    result = await DeviceService.update_status(query_db, command, current_user.user.user_name)
     return ResponseUtil.success(msg=result.message)
 
 
@@ -198,10 +212,12 @@ async def stop_device_recording(
     '/{device_code}/command/{message_id}',
     dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))],
 )
-async def get_device_command_log(device_code: str, message_id: str):
-    result = await MinglueApiService.get_command_log(device_code, message_id)
+async def get_device_command_log(
+    device_code: str, message_id: str, query_db: AsyncSession = Depends(get_db)
+):
+    """指令结果查询（契约 §4.5）：返回厂商接收日志与本地控制日志。"""
+    result = await ControlLogService.resolve_command_result(query_db, device_code, message_id)
     return ResponseUtil.success(data=result)
-
 
 @deviceController.get(
     '/recording/list',
