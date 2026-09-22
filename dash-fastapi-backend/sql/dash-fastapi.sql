@@ -268,6 +268,8 @@ insert into sys_menu values('1064', '设备删除', '118', '4', '#', '', '', '',
 insert into sys_menu values('1065', '回调查询', '119', '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:query',      '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1066', '回调删除', '119', '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:remove',     '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1067', '设备控制', '118', '5', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:manage:control',      '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1068', '录音记录查询', '118', '6', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:recording:list',     '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1069', '控制日志查询', '118', '7', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:control:list',       '#', 'admin', sysdate(), '', null, '');
 
 
 -- ----------------------------
@@ -741,7 +743,9 @@ create table ml_device (
   device_name varchar(100) default '' comment '设备名称',
   model varchar(100) default '' comment '设备型号',
   firmware_version varchar(100) default '' comment '固件版本',
-  status varchar(20) not null default 'offline' comment '在线状态',
+  status varchar(20) not null default 'offline' comment '本地在线状态（含 disabled 停用）',
+  online_status int default null comment '心跳 online 三态：2在线 1开机未在线 0离线',
+  device_status int default null comment '心跳 device_status：1正常在线 0离线',
   bind_status varchar(20) not null default 'unbound' comment '绑定状态',
   owner_name varchar(100) default '' comment '使用人',
   owner_phone varchar(50) default '' comment '使用人手机号',
@@ -762,10 +766,13 @@ create table ml_device (
   today_record_seconds int default null comment '当日录音秒数',
   pending_recordings int default null comment '待上传录音数',
   tenant_id bigint default null comment '厂商租户ID',
-  audio_id varchar(100) default null comment 'API录音标识',
+  audio_id varchar(100) default null comment 'API录音标识（心跳 nm）',
   last_seen_time datetime default null comment '最后在线时间',
+  heartbeat_time datetime default null comment '设备上报的心跳时间原值',
+  config_json text default null comment '厂商最新配置快照（config/status/batch 原样）',
+  config_last_upload_time datetime default null comment '厂商配置最后上传时间',
+  config_synced_at datetime default null comment '本地配置同步时间',
   activated_at datetime default null comment '激活时间',
-  config_json text default null comment '设备扩展配置JSON',
   create_by varchar(64) default '',
   create_time datetime default null,
   update_by varchar(64) default '',
@@ -774,27 +781,103 @@ create table ml_device (
   primary key (device_id),
   unique key uk_ml_device_code (device_code),
   key idx_ml_device_status (status),
+  key idx_ml_device_online_status (online_status),
   key idx_ml_device_last_seen (last_seen_time)
 ) engine=innodb comment='明略硬件设备表';
 
 -- ----------------------------
 -- 21、设备回调日志表
+-- 幂等：dedup_key 为非空 SHA-256，承担唯一索引；可空列 NULL 不去重，
+-- 因此 event_id 仅作业务键留存，不作为唯一约束。
 -- ----------------------------
 drop table if exists ml_callback_log;
 create table ml_callback_log (
   callback_id bigint(20) not null auto_increment comment '回调主键',
-  event_id varchar(128) default null comment '上游事件唯一标识',
+  event_id varchar(255) default null comment '上游业务唯一键（无业务键时为 NULL）',
+  dedup_key varchar(128) not null comment '幂等键 SHA-256，非空且唯一',
   event_type varchar(100) not null default 'unknown' comment '事件类型',
+  log_type varchar(100) default null comment 'upload 类回调的 logType：log/rec',
   device_code varchar(100) default null comment '设备编码',
+  session_id bigint default null comment '回调配置ID（session_id，webhook id）',
+  topic_name varchar(64) default null comment '回调主题（topic_name）',
+  item_count int default 1 comment '单次回调携带的设备/文件条目数',
   event_time datetime default null comment '设备事件时间',
   received_at datetime not null comment '接收时间',
   signature_valid char(1) not null default 'Y' comment '签名是否有效',
   process_status varchar(20) not null default 'success' comment '处理状态',
+  duplicate_flag char(1) not null default 'N' comment '是否重复回调（Y是 N否）',
+  processed_at datetime default null comment '处理结束时间',
   payload_json longtext not null comment '原始JSON报文',
   error_message varchar(1000) default null comment '错误信息',
   request_ip varchar(128) default null comment '请求IP',
   primary key (callback_id),
-  unique key uk_ml_callback_event_id (event_id),
-  key idx_ml_callback_device (device_code),
-  key idx_ml_callback_received (received_at)
+  unique key uk_ml_callback_dedup_key (dedup_key),
+  key idx_ml_callback_event_id (event_id),
+  key idx_ml_callback_device_type (device_code, event_type),
+  key idx_ml_callback_received (received_at),
+  key idx_ml_callback_status_received (process_status, received_at)
 ) engine=innodb comment='设备回调日志表';
+
+-- ----------------------------
+-- 22、录音文件与转码/ASR 产物表
+-- ----------------------------
+drop table if exists ml_recording_file;
+create table ml_recording_file (
+  recording_id bigint(20) not null auto_increment comment '录音记录主键',
+  object_key varchar(500) not null comment '厂商对象存储路径，录音幂等键',
+  device_code varchar(100) default null comment '设备编码',
+  session_id bigint default null comment '录音会话ID',
+  callback_session_id bigint default null comment '回调配置ID（session_id）',
+  record_no varchar(255) default null comment '录音文件名',
+  audio_id varchar(100) default null comment 'API录音标识（自定义字段）',
+  duration bigint default null comment '音频时长',
+  size bigint default null comment '文件大小（字节）',
+  download_url varchar(1000) default null comment '厂商下载地址（带签名，有有效期）',
+  merge_success_time datetime default null comment '录音合并成功时间',
+  is_eof char(1) default 'N' comment '是否为结束分片（文件名 _eof）',
+  record_status varchar(20) not null default 'uploaded' comment '本地处理状态',
+  transcode_task_id varchar(128) default null comment '厂商转码任务ID（fc.task_id）',
+  transcode_status varchar(50) default null comment '转码状态（原样保存，取值域待厂商确认）',
+  group_key varchar(128) default null comment '转码分组键（fc.group_key）',
+  transcode_file_path varchar(500) default null comment '转码产物对象路径',
+  transcode_download_url varchar(1000) default null comment '转码产物下载地址',
+  transcode_finished_at datetime default null comment '转码完成时间',
+  asr_task_id varchar(128) default null comment 'ASR 任务ID（asrTskId）',
+  asr_status varchar(50) default null comment 'ASR 状态（原样保存，取值域待厂商确认）',
+  asr_text_object_key varchar(500) default null comment 'ASR 文本结果对象路径',
+  asr_text_json longtext default null comment 'ASR 文本结果原文',
+  event_time datetime default null comment '事件时间',
+  create_time datetime default null comment '创建时间',
+  update_time datetime default null comment '更新时间',
+  primary key (recording_id),
+  unique key uk_ml_recording_object_key (object_key),
+  key idx_ml_recording_device (device_code),
+  key idx_ml_recording_task (transcode_task_id),
+  key idx_ml_recording_asr (asr_task_id)
+) engine=innodb comment='录音文件与转码/ASR产物表';
+
+-- ----------------------------
+-- 23、设备控制指令日志表
+-- 仅留存厂商 msg_id 与状态，禁止写入 token 或厂商凭证。
+-- ----------------------------
+drop table if exists ml_device_control_log;
+create table ml_device_control_log (
+  control_id bigint(20) not null auto_increment comment '控制日志主键',
+  device_code varchar(100) not null comment '设备编码',
+  command varchar(50) not null comment '指令类型：start_recording/stop_recording',
+  audio_id varchar(100) default null comment '开启录音携带的音频ID（nm）',
+  msg_id varchar(128) default null comment '厂商返回的消息ID，用于回查',
+  request_status varchar(20) not null default 'success' comment '本地请求结果',
+  remote_status int default null comment '厂商指令状态：0初始化 1成功 2返回出错 3返回超时',
+  payload_json text default null comment '厂商请求载荷（已脱敏）',
+  response_json text default null comment '厂商响应载荷',
+  error_message varchar(1000) default null comment '错误信息',
+  operator varchar(64) default '' comment '操作人',
+  request_ip varchar(128) default null comment '请求IP',
+  create_time datetime default null comment '创建时间',
+  update_time datetime default null comment '更新时间',
+  primary key (control_id),
+  unique key uk_ml_control_msg_id (msg_id),
+  key idx_ml_control_device (device_code),
+  key idx_ml_control_created (create_time)
+) engine=innodb comment='设备控制指令日志表';

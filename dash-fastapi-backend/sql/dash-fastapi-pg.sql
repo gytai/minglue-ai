@@ -350,6 +350,8 @@ insert into sys_menu values(1064, '设备删除', 118, '4', '#', '', '', '', 1, 
 insert into sys_menu values(1065, '回调查询', 119, '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:query',      '#', 'admin', current_timestamp, '', null, '');
 insert into sys_menu values(1066, '回调删除', 119, '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:remove',     '#', 'admin', current_timestamp, '', null, '');
 insert into sys_menu values(1067, '设备控制', 118, '5', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:manage:control',      '#', 'admin', current_timestamp, '', null, '');
+insert into sys_menu values(1068, '录音记录查询', 118, '6', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:recording:list',     '#', 'admin', current_timestamp, '', null, '');
+insert into sys_menu values(1069, '控制日志查询', 118, '7', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:control:list',       '#', 'admin', current_timestamp, '', null, '');
 
 -- ----------------------------
 -- 6、用户和角色关联表  用户N-1角色
@@ -987,6 +989,8 @@ create table ml_device (
     model varchar(100) default '',
     firmware_version varchar(100) default '',
     status varchar(20) not null default 'offline',
+    online_status int4,
+    device_status int4,
     bind_status varchar(20) not null default 'unbound',
     owner_name varchar(100) default '',
     owner_phone varchar(50) default '',
@@ -1009,8 +1013,11 @@ create table ml_device (
     tenant_id int8,
     audio_id varchar(100),
     last_seen_time timestamp(0),
-    activated_at timestamp(0),
+    heartbeat_time timestamp(0),
     config_json text,
+    config_last_upload_time timestamp(0),
+    config_synced_at timestamp(0),
+    activated_at timestamp(0),
     create_by varchar(64) default '',
     create_time timestamp(0),
     update_by varchar(64) default '',
@@ -1020,31 +1027,109 @@ create table ml_device (
     constraint uk_ml_device_code unique (device_code)
 );
 create index idx_ml_device_status on ml_device(status);
+create index idx_ml_device_online_status on ml_device(online_status);
 create index idx_ml_device_last_seen on ml_device(last_seen_time);
 comment on table ml_device is '明略硬件设备表';
 
 -- ----------------------------
 -- 21、设备回调日志表
+-- 幂等：dedup_key 为非空 SHA-256，承担唯一索引；可空列 NULL 不去重，
+-- 因此 event_id 仅作业务键留存，不作为唯一约束。
 -- ----------------------------
 drop table if exists ml_callback_log;
 create table ml_callback_log (
     callback_id bigserial not null,
-    event_id varchar(128),
+    event_id varchar(255),
+    dedup_key varchar(128) not null,
     event_type varchar(100) not null default 'unknown',
+    log_type varchar(100),
     device_code varchar(100),
+    session_id int8,
+    topic_name varchar(64),
+    item_count int4 default 1,
     event_time timestamp(0),
     received_at timestamp(0) not null,
     signature_valid char(1) not null default 'Y',
     process_status varchar(20) not null default 'success',
+    duplicate_flag char(1) not null default 'N',
+    processed_at timestamp(0),
     payload_json text not null,
     error_message varchar(1000),
     request_ip varchar(128),
     primary key (callback_id),
-    constraint uk_ml_callback_event_id unique (event_id)
+    constraint uk_ml_callback_dedup_key unique (dedup_key)
 );
-create index idx_ml_callback_device on ml_callback_log(device_code);
+create index idx_ml_callback_event_id on ml_callback_log(event_id);
+create index idx_ml_callback_device_type on ml_callback_log(device_code, event_type);
 create index idx_ml_callback_received on ml_callback_log(received_at);
+create index idx_ml_callback_status_received on ml_callback_log(process_status, received_at);
 comment on table ml_callback_log is '设备回调日志表';
+
+-- ----------------------------
+-- 22、录音文件与转码/ASR 产物表
+-- ----------------------------
+drop table if exists ml_recording_file;
+create table ml_recording_file (
+    recording_id bigserial not null,
+    object_key varchar(500) not null,
+    device_code varchar(100),
+    session_id int8,
+    callback_session_id int8,
+    record_no varchar(255),
+    audio_id varchar(100),
+    duration int8,
+    size int8,
+    download_url varchar(1000),
+    merge_success_time timestamp(0),
+    is_eof char(1) default 'N',
+    record_status varchar(20) not null default 'uploaded',
+    transcode_task_id varchar(128),
+    transcode_status varchar(50),
+    group_key varchar(128),
+    transcode_file_path varchar(500),
+    transcode_download_url varchar(1000),
+    transcode_finished_at timestamp(0),
+    asr_task_id varchar(128),
+    asr_status varchar(50),
+    asr_text_object_key varchar(500),
+    asr_text_json text,
+    event_time timestamp(0),
+    create_time timestamp(0),
+    update_time timestamp(0),
+    primary key (recording_id),
+    constraint uk_ml_recording_object_key unique (object_key)
+);
+create index idx_ml_recording_device on ml_recording_file(device_code);
+create index idx_ml_recording_task on ml_recording_file(transcode_task_id);
+create index idx_ml_recording_asr on ml_recording_file(asr_task_id);
+comment on table ml_recording_file is '录音文件与转码/ASR产物表';
+
+-- ----------------------------
+-- 23、设备控制指令日志表
+-- 仅留存厂商 msg_id 与状态，禁止写入 token 或厂商凭证。
+-- ----------------------------
+drop table if exists ml_device_control_log;
+create table ml_device_control_log (
+    control_id bigserial not null,
+    device_code varchar(100) not null,
+    command varchar(50) not null,
+    audio_id varchar(100),
+    msg_id varchar(128),
+    request_status varchar(20) not null default 'success',
+    remote_status int4,
+    payload_json text,
+    response_json text,
+    error_message varchar(1000),
+    operator varchar(64) default '',
+    request_ip varchar(128),
+    create_time timestamp(0),
+    update_time timestamp(0),
+    primary key (control_id),
+    constraint uk_ml_control_msg_id unique (msg_id)
+);
+create index idx_ml_control_device on ml_device_control_log(device_code);
+create index idx_ml_control_created on ml_device_control_log(create_time);
+comment on table ml_device_control_log is '设备控制指令日志表';
 
 CREATE OR REPLACE FUNCTION "find_in_set"(int8, varchar)
     RETURNS "pg_catalog"."bool" AS $BODY$

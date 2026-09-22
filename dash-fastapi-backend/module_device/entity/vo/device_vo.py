@@ -14,7 +14,9 @@ class DeviceModel(BaseModel):
     device_name: Optional[str] = Field(default='', max_length=100, description='设备名称')
     model: Optional[str] = Field(default='', max_length=100, description='设备型号')
     firmware_version: Optional[str] = Field(default='', max_length=100, description='固件版本')
-    status: Literal['online', 'offline', 'disabled'] = Field(default='offline', description='在线状态')
+    status: Literal['online', 'offline', 'disabled'] = Field(default='offline', description='本地在线状态')
+    online_status: Optional[int] = Field(default=None, ge=0, le=2, description='心跳 online 三态：2在线 1开机未在线 0离线')
+    device_status: Optional[int] = Field(default=None, ge=0, le=1, description='心跳 device_status：1正常在线 0离线')
     bind_status: Literal['bound', 'unbound'] = Field(default='unbound', description='绑定状态')
     owner_name: Optional[str] = Field(default='', max_length=100, description='使用人')
     owner_phone: Optional[str] = Field(default='', max_length=50, description='手机号')
@@ -37,8 +39,11 @@ class DeviceModel(BaseModel):
     tenant_id: Optional[int] = Field(default=None, description='厂商租户ID')
     audio_id: Optional[str] = Field(default=None, max_length=100, description='API录音标识')
     last_seen_time: Optional[datetime] = Field(default=None, description='最后在线时间')
+    heartbeat_time: Optional[datetime] = Field(default=None, description='设备上报的心跳时间原值')
+    config_json: Optional[str] = Field(default=None, description='厂商最新配置快照JSON')
+    config_last_upload_time: Optional[datetime] = Field(default=None, description='厂商配置最后上传时间')
+    config_synced_at: Optional[datetime] = Field(default=None, description='本地配置同步时间')
     activated_at: Optional[datetime] = Field(default=None, description='激活时间')
-    config_json: Optional[str] = Field(default=None, description='扩展配置JSON')
     create_by: Optional[str] = Field(default='', description='创建者')
     create_time: Optional[datetime] = Field(default=None, description='创建时间')
     update_by: Optional[str] = Field(default='', description='更新者')
@@ -58,7 +63,8 @@ class DevicePageQueryModel(BaseModel):
     device_code: Optional[str] = Field(default=None, description='设备编码')
     device_name: Optional[str] = Field(default=None, description='设备名称')
     model: Optional[str] = Field(default=None, description='设备型号')
-    status: Optional[str] = Field(default=None, description='在线状态')
+    status: Optional[str] = Field(default=None, description='本地在线状态')
+    online_status: Optional[int] = Field(default=None, description='心跳 online 三态')
     bind_status: Optional[str] = Field(default=None, description='绑定状态')
     owner_name: Optional[str] = Field(default=None, description='使用人')
     page_num: int = Field(default=1, ge=1, description='当前页码')
@@ -74,13 +80,15 @@ class DeviceStatusModel(BaseModel):
 
 
 class CallbackPageQueryModel(BaseModel):
-    event_type: Optional[str] = None
-    device_code: Optional[str] = None
-    process_status: Optional[str] = None
-    begin_time: Optional[str] = None
-    end_time: Optional[str] = None
-    page_num: int = Field(default=1, ge=1)
-    page_size: int = Field(default=10, ge=1, le=500)
+    event_type: Optional[str] = Field(default=None, description='事件类型')
+    device_code: Optional[str] = Field(default=None, description='设备编码')
+    process_status: Optional[str] = Field(default=None, description='处理状态')
+    duplicate_flag: Optional[str] = Field(default=None, description='是否重复回调（Y/N）')
+    session_id: Optional[int] = Field(default=None, description='回调配置ID')
+    begin_time: Optional[str] = Field(default=None, description='接收时间起，YYYY-MM-DD')
+    end_time: Optional[str] = Field(default=None, description='接收时间止，YYYY-MM-DD')
+    page_num: int = Field(default=1, ge=1, description='当前页码')
+    page_size: int = Field(default=10, ge=1, le=500, description='每页记录数')
 
 
 class CallbackPayloadModel(BaseModel):
@@ -115,3 +123,30 @@ class StartRecordingModel(BaseModel):
         pattern=r'^[a-z0-9]{2,10}$',
         description='音频ID，仅允许2-10位小写字母或数字',
     )
+
+
+class RecordingPageQueryModel(BaseModel):
+    """录音文件与转码/ASR 产物查询。"""
+
+    device_code: Optional[str] = Field(default=None, description='设备编码')
+    object_key: Optional[str] = Field(default=None, description='对象存储路径')
+    record_status: Optional[str] = Field(default=None, description='本地处理状态')
+    transcode_task_id: Optional[str] = Field(default=None, description='转码任务ID')
+    asr_task_id: Optional[str] = Field(default=None, description='ASR任务ID')
+    begin_time: Optional[str] = Field(default=None, description='事件时间起，YYYY-MM-DD')
+    end_time: Optional[str] = Field(default=None, description='事件时间止，YYYY-MM-DD')
+    page_num: int = Field(default=1, ge=1, description='当前页码')
+    page_size: int = Field(default=10, ge=1, le=500, description='每页记录数')
+
+
+class ControlLogPageQueryModel(BaseModel):
+    """设备控制指令日志查询。"""
+
+    device_code: Optional[str] = Field(default=None, description='设备编码')
+    command: Optional[str] = Field(default=None, description='指令类型')
+    request_status: Optional[str] = Field(default=None, description='本地请求结果')
+    msg_id: Optional[str] = Field(default=None, description='厂商消息ID')
+    begin_time: Optional[str] = Field(default=None, description='创建时间起，YYYY-MM-DD')
+    end_time: Optional[str] = Field(default=None, description='创建时间止，YYYY-MM-DD')
+    page_num: int = Field(default=1, ge=1, description='当前页码')
+    page_size: int = Field(default=10, ge=1, le=500, description='每页记录数')

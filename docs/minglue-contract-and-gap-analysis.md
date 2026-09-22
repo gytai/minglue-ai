@@ -1,6 +1,6 @@
 # 明略 AIOT 接口契约盘点与现状差距分析
 
-- **文档版本**：v1.0
+- **文档版本**：v1.1
 - **文档更新时间**：2026-09-22
 - **对应 issue**：GYTAI-127（明略后台 1/6：接口规范盘点与现状差距分析）
 - **契约基线提交**：`agent/codex/gytai-123` 的 `3626af6` / `27ed2e8` / `18c2a91`
@@ -526,13 +526,13 @@ BODY: { "code": 0 }
 | B3 | 心跳响应需 3s 内返回 | 同步落库后返回，未见超时保护；高频心跳下存在超时风险 | 部分满足 | P1 |
 | B4 | `rec` 类型识别与多设备遍历 | 由 `type` 识别，`content[]` 逐设备 upsert | 已满足 | — |
 | B5 | `op` / `sys` / `reclist` 类型识别 | 由 `type` 识别；`log_type`/`csn` 可正确取设备 | 已满足 | — |
-| B6 | `upload` 类型识别 | 无 `type`，仅有 `logType`(log/rec)；`EVENT_TYPE_KEYS` 把 `logType` 当事件类型 → 落库为 `log`/`rec`，**无法与 `rec` 音频回调区分** | 部分满足 | **P0** |
+| B6 | `upload` 类型识别 | 已归一化：先看 `type`，无 `type` 时按 `objectKey`/`fileName`/`updatedAt` 判定为 `upload`，`logType` 单独落 `log_type` 列 | 已满足（Stage 2） | — |
 | B7 | `fc` 类型识别 | 由 `type` 识别；`sn`/`task_id` 可提取 | 已满足 | — |
 | B8 | `asr` 类型识别 | 由 `type` 识别；`sn`/`asrTskId` 可提取 | 已满足 | — |
 | B9 | 心跳（无 `type`）类型识别 | `_infer_event_type` 依据 `device_status`+`update_time` 判定 | 已满足 | — |
 | B10 | 原始报文完整留存 | `payload_json` 存整包 JSON（MySQL `longtext` / PG `text`） | 已满足 | — |
-| B11 | 幂等键确定性策略 | `event_id` 取 `object_key`/`task_id`/`asrTskId` 等；**心跳等无业务键的回调 `event_id` 为 NULL**，唯一索引对 NULL 不去重；`rec` 单次多文件只取首条 `object_key` | 部分满足 | **P0** |
-| B12 | 处理失败可追踪 | 设备 upsert 与回调日志写入同事务，异常整体回滚 → **原始报文丢失**，厂商重试前无审计 | 部分满足 | **P0** |
+| B11 | 幂等键确定性策略 | `dedup_key`（SHA-256，非空唯一）承担去重；有业务键用业务键，无业务键退化为报文规范化摘要；`rec` 每个 `object_key` 各自一条记录 | 已满足（Stage 2） | — |
+| B12 | 处理失败可追踪 | 业务改动回滚后用独立事务补 `failed` 审计记录，原始报文不丢失 | 已满足（Stage 2） | — |
 | B13 | 签名/鉴权 | 厂商**未定义**回调签名；现有可选 HMAC-SHA256 属本地加固 | 部分满足 | P1 |
 | B14 | 签名校验失败审计 | 校验失败直接 401，`signature_valid` 恒为 `'Y'`，无拒绝记录 | 部分满足 | P1 |
 | B15 | `session_id`（webhook id）留存 | 未单独落库 | 缺失 | P2 |
@@ -587,12 +587,12 @@ BODY: { "code": 0 }
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
 | D1 | 设备主表字段对齐心跳字段 | `ml_device` 覆盖 `sn`(device_code)、`record_status`、`remain_power`(battery_level)、`remain_storage`、`total_storage`、`rssi`(signal_strength)、`update_time`(last_seen_time)、`version`(firmware_version)、`key_status`、`usb_status`、`battery_voltage`、`battery_current`、`chip`、`cip`(ip_address)、`charged_status`、`disk_mount_status`、`online`(status)、`rectd`(today_record_seconds)、`recnu`(pending_recordings)、`tenant_id`、`nm`(audio_id) | 已满足 | — |
-| D2 | 在线状态三态语义 | 文档 `online` 有 2/1/0 三态，`device_status` 有 1/0；本地 `status` 仅 `online`/`offline`/`disabled`，**丢失"开机未在线"** | 部分满足 | P1 |
-| D3 | 超 5 分钟未上报即离线 | 无基于 `last_seen_time` 的超时兜底任务 | 缺失 | P1 |
+| D2 | 在线状态三态语义 | 新增 `online_status` 原样保存 2/1/0，`status` 保留本地语汇 | 已满足（Stage 2） | — |
+| D3 | 超 5 分钟未上报即离线 | `DeviceService.mark_stale_devices_offline` 提供超时兜底，仅处理 `online` 设备 | 已满足（Stage 2） | — |
 | D4 | 回调日志表字段 | `event_id`/`event_type`/`device_code`/`event_time`/`received_at`/`signature_valid`/`process_status`/`payload_json`/`error_message`/`request_ip` | 已满足 | — |
-| D5 | 回调幂等唯一约束 | MySQL/PG 均有 `uk_ml_callback_event_id`，但**可空列 + NULL 不去重** | 部分满足 | **P0** |
-| D6 | 录音文件 / 转码结果 / ASR 文本持久化 | **无对应表**；`files[].file_path`、`download_url`、`group_key`、`asrTskId`、`asrTextResultList`、`rec.duration` 全部丢弃 | 缺失 | P1 |
-| D7 | 配置状态字段承载 | `config_data` 无结构化字段，`last_upload_time` 无列 | 缺失 | P1 |
+| D5 | 回调幂等唯一约束 | `uk_ml_callback_dedup_key` 建在**非空**列上，可空列 NULL 不去重的漏洞消除 | 已满足（Stage 2） | — |
+| D6 | 录音文件 / 转码结果 / ASR 文本持久化 | 新增 `ml_recording_file`（26 列）承载 duration/转码/ASR | 已满足（Stage 2） | — |
+| D7 | 配置状态字段承载 | 新增 `config_json`/`config_last_upload_time`/`config_synced_at`，`sync_remote_configs` 落库 | 已满足（Stage 2） | — |
 | D8 | MySQL / PG 脚本等价 | 两套脚本表结构、唯一键、索引等价（`payload_json` longtext/text 差异属方言正常） | 已满足 | — |
 | D9 | 菜单与权限种子数据 | 两套脚本均含 `device:manage:*`、`device:callback:*`、`device:manage:control` 共 9 条权限 | 已满足 | — |
 | D10 | 不保存厂商明文凭证 | 仓库无 Apifox 密码；README 中密码为占位符；**但文档示例 AES 密钥被写入测试向量**（见 §6-4） | 需确认 | P1 |
@@ -625,7 +625,7 @@ BODY: { "code": 0 }
 | F6 | 厂商接口 mock 测试（token 刷新、错误映射、参数序列化） | **无** | 缺失 | P1 |
 | F7 | 数据库迁移 / 唯一约束 / 新旧库升级测试 | **无** | 缺失 | P1 |
 | F8 | 前端回调/组件测试 | **无** | 缺失 | P2 |
-| F9 | 测试可在干净环境被收集 | **否**：`config/database.py` 在 import 期即创建 async engine，裸环境缺少 `asyncmy` 时连测试收集都失败 | 部分满足 | P1 |
+| F9 | 测试可在干净环境被收集 | `config/database.py` 改为惰性建引擎；无 MySQL/PG 驱动时仍可收集并跑完 45 个测试 | 已满足（Stage 2） | — |
 
 #### F9 的实测复现
 
@@ -758,3 +758,4 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | 版本 | 日期 | 更新人 | 变更摘要 |
 | --- | --- | --- | --- |
 | v1.0 | 2026-09-22 | CodeBuddy（Stage 1） | 首次盘点：4 篇说明 + 6 个接口契约，8 类回调，差距矩阵与 P0/P1/P2 排序 |
+| v1.1 | 2026-09-22 | CodeBuddy（Stage 2） | 数据模型/DAO/迁移定稿：关闭 B6/B11/B12、D2/D3/D5/D6/D7、F9；新增 `ml_recording_file`、`ml_device_control_log`；新增可重复执行的双库迁移脚本；补 45 个模型/DAO/迁移测试 |

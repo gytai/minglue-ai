@@ -16,13 +16,20 @@ from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_admin.service.login_service import LoginService
 from module_device.entity.vo.device_vo import (
     CallbackPageQueryModel,
+    ControlLogPageQueryModel,
     DeleteDeviceModel,
     DeviceBatchModel,
     DeviceModel,
     DevicePageQueryModel,
+    RecordingPageQueryModel,
     StartRecordingModel,
 )
-from module_device.service.device_service import CallbackService, DeviceService
+from module_device.service.device_service import (
+    CallbackService,
+    ControlLogService,
+    DeviceService,
+    RecordingService,
+)
 from module_device.service.minglue_api_service import MinglueApiService
 from utils.page_util import PageResponseModel
 from utils.response_util import ResponseUtil
@@ -97,9 +104,23 @@ async def sync_remote_status(
 @deviceController.post(
     '/remote/config', dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))]
 )
-async def get_remote_config(command: DeviceBatchModel):
-    result = await MinglueApiService.get_device_config_statuses(command.sns)
+@Log(title='设备配置同步', business_type=BusinessType.UPDATE)
+async def sync_remote_config(
+    request: Request,
+    command: DeviceBatchModel,
+    query_db: AsyncSession = Depends(get_db),
+):
+    result = await DeviceService.sync_remote_configs(query_db, command.sns)
     return ResponseUtil.success(data=result)
+
+
+@deviceController.post(
+    '/remote/offline-sweep', dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))]
+)
+async def mark_stale_offline(query_db: AsyncSession = Depends(get_db)):
+    """心跳超时兜底：把超过 5 分钟未上报的设备置为离线。"""
+    count = await DeviceService.mark_stale_devices_offline(query_db)
+    return ResponseUtil.success(data={'offline': count})
 
 
 @deviceController.post(
@@ -107,8 +128,35 @@ async def get_remote_config(command: DeviceBatchModel):
     dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))],
 )
 @Log(title='开启设备录音', business_type=BusinessType.UPDATE)
-async def start_device_recording(request: Request, device_code: str, command: StartRecordingModel):
-    result = await MinglueApiService.start_recording(device_code, command.audio_id)
+async def start_device_recording(
+    request: Request,
+    device_code: str,
+    command: StartRecordingModel,
+    query_db: AsyncSession = Depends(get_db),
+    current_user: CurrentUserModel = Depends(LoginService.get_current_user),
+):
+    try:
+        result = await MinglueApiService.start_recording(device_code, command.audio_id)
+    except Exception as exc:
+        await ControlLogService.record(
+            query_db,
+            device_code=device_code,
+            command='start_recording',
+            audio_id=command.audio_id,
+            error=exc,
+            operator=current_user.user.user_name,
+            request_ip=request.client.host if request.client else None,
+        )
+        raise
+    await ControlLogService.record(
+        query_db,
+        device_code=device_code,
+        command='start_recording',
+        audio_id=command.audio_id,
+        result=result if isinstance(result, dict) else None,
+        operator=current_user.user.user_name,
+        request_ip=request.client.host if request.client else None,
+    )
     return ResponseUtil.success(data=result)
 
 
@@ -117,8 +165,32 @@ async def start_device_recording(request: Request, device_code: str, command: St
     dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))],
 )
 @Log(title='停止设备录音', business_type=BusinessType.UPDATE)
-async def stop_device_recording(request: Request, device_code: str):
-    result = await MinglueApiService.stop_recording(device_code)
+async def stop_device_recording(
+    request: Request,
+    device_code: str,
+    query_db: AsyncSession = Depends(get_db),
+    current_user: CurrentUserModel = Depends(LoginService.get_current_user),
+):
+    try:
+        result = await MinglueApiService.stop_recording(device_code)
+    except Exception as exc:
+        await ControlLogService.record(
+            query_db,
+            device_code=device_code,
+            command='stop_recording',
+            error=exc,
+            operator=current_user.user.user_name,
+            request_ip=request.client.host if request.client else None,
+        )
+        raise
+    await ControlLogService.record(
+        query_db,
+        device_code=device_code,
+        command='stop_recording',
+        result=result if isinstance(result, dict) else None,
+        operator=current_user.user.user_name,
+        request_ip=request.client.host if request.client else None,
+    )
     return ResponseUtil.success(data=result)
 
 
@@ -129,6 +201,24 @@ async def stop_device_recording(request: Request, device_code: str):
 async def get_device_command_log(device_code: str, message_id: str):
     result = await MinglueApiService.get_command_log(device_code, message_id)
     return ResponseUtil.success(data=result)
+
+
+@deviceController.get(
+    '/recording/list',
+    response_model=PageResponseModel,
+    dependencies=[Depends(CheckUserInterfaceAuth('device:recording:list'))],
+)
+async def list_recordings(query: RecordingPageQueryModel = Query(), query_db: AsyncSession = Depends(get_db)):
+    return ResponseUtil.success(model_content=await RecordingService.get_list(query_db, query))
+
+
+@deviceController.get(
+    '/control/list',
+    response_model=PageResponseModel,
+    dependencies=[Depends(CheckUserInterfaceAuth('device:control:list'))],
+)
+async def list_control_logs(query: ControlLogPageQueryModel = Query(), query_db: AsyncSession = Depends(get_db)):
+    return ResponseUtil.success(model_content=await ControlLogService.get_list(query_db, query))
 
 
 @deviceController.get(
@@ -177,9 +267,15 @@ async def receive_callback(
     x_callback_signature: Optional[str] = Header(default=None, alias='X-Callback-Signature'),
     query_db: AsyncSession = Depends(get_db),
 ):
-    """接收明略设备回调；事件字段未定时仍完整保存原始JSON。"""
-    if not _verify_signature(await request.body(), x_signature or x_callback_signature):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='回调签名校验失败')
+    """接收明略设备回调；事件字段未定时仍完整保存原始JSON。
+
+    厂商文档未定义回调签名；``MINGLUE_CALLBACK_SECRET`` 是本系统的加固能力，
+    默认关闭，不得对外声称是厂商标准（契约 §6-5）。
+    """
     request_ip = request.headers.get('X-Forwarded-For') or (request.client.host if request.client else None)
+    if not _verify_signature(await request.body(), x_signature or x_callback_signature):
+        # 契约 B14：校验失败也必须留审计痕迹，且记录 signature_valid='N'。
+        await CallbackService.record_rejected(query_db, payload, event_type, request_ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='回调签名校验失败')
     await CallbackService.receive(query_db, payload, event_type, request_ip)
     return JSONResponse(status_code=status.HTTP_200_OK, content={'code': 0})
