@@ -482,6 +482,9 @@ insert into sys_role_menu values (2, 1063);
 insert into sys_role_menu values (2, 1064);
 insert into sys_role_menu values (2, 1065);
 insert into sys_role_menu values (2, 1066);
+insert into sys_role_menu values (2, 1067);
+insert into sys_role_menu values (2, 1068);
+insert into sys_role_menu values (2, 1069);
 
 -- ----------------------------
 -- 8、角色和部门关联表  角色1-N部门

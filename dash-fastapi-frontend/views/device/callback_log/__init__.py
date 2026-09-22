@@ -2,7 +2,25 @@ import feffery_antd_components as fac
 from dash import dcc, html
 
 from callbacks.device_c import callback_log_c
+from callbacks.device_c.device_page_logic import (
+    CALLBACK_EVENT_TYPES,
+    PROCESS_STATUS_LABELS,
+)
 from utils.permission_util import PermissionManager
+
+
+EVENT_TYPE_OPTIONS = [
+    {'label': event_type, 'value': event_type}
+    for event_type in CALLBACK_EVENT_TYPES
+]
+PROCESS_STATUS_OPTIONS = [
+    {'label': label, 'value': value}
+    for value, label in PROCESS_STATUS_LABELS.items()
+]
+DUPLICATE_OPTIONS = [
+    {'label': '首次', 'value': 'N'},
+    {'label': '重复', 'value': 'Y'},
+]
 
 
 def render(*args, **kwargs):
@@ -20,22 +38,43 @@ def render(*args, **kwargs):
                             id='callback-device-code-search',
                             placeholder='设备编码',
                             allowClear=True,
-                            style={'width': 190},
+                            style={'width': 170},
                         ),
                         label='设备编码',
                     ),
                     fac.AntdFormItem(
-                        fac.AntdInput(
+                        fac.AntdSelect(
                             id='callback-event-type-search',
-                            placeholder='事件类型',
+                            options=EVENT_TYPE_OPTIONS,
+                            placeholder='全部类型',
                             allowClear=True,
-                            style={'width': 180},
+                            style={'width': 140},
                         ),
                         label='事件类型',
                     ),
                     fac.AntdFormItem(
+                        fac.AntdSelect(
+                            id='callback-process-status-search',
+                            options=PROCESS_STATUS_OPTIONS,
+                            placeholder='全部结果',
+                            allowClear=True,
+                            style={'width': 130},
+                        ),
+                        label='处理结果',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdSelect(
+                            id='callback-duplicate-search',
+                            options=DUPLICATE_OPTIONS,
+                            placeholder='全部',
+                            allowClear=True,
+                            style={'width': 110},
+                        ),
+                        label='是否重复',
+                    ),
+                    fac.AntdFormItem(
                         fac.AntdDateRangePicker(
-                            id='callback-time-search', style={'width': 250}
+                            id='callback-time-search', style={'width': 240}
                         ),
                         label='接收时间',
                     ),
@@ -82,9 +121,14 @@ def render(*args, **kwargs):
                 id='callback-list-table',
                 data=table_data,
                 columns=[
-                    {'title': 'ID', 'dataIndex': 'callback_id', 'width': 90},
-                    {'title': '事件类型', 'dataIndex': 'event_type'},
+                    {'title': 'ID', 'dataIndex': 'callback_id', 'width': 80},
+                    {
+                        'title': '事件类型',
+                        'dataIndex': 'event_type',
+                        'width': 110,
+                    },
                     {'title': '设备编码', 'dataIndex': 'device_code'},
+                    {'title': '事件ID', 'dataIndex': 'event_id'},
                     {
                         'title': '事件时间',
                         'dataIndex': 'event_time',
@@ -96,11 +140,20 @@ def render(*args, **kwargs):
                         'width': 170,
                     },
                     {
-                        'title': '处理状态',
-                        'dataIndex': 'process_status',
+                        'title': '处理结果',
+                        'dataIndex': 'process_status_display',
                         'width': 100,
                     },
-                    {'title': '来源IP', 'dataIndex': 'request_ip'},
+                    {
+                        'title': '是否重复',
+                        'dataIndex': 'duplicate_display',
+                        'width': 100,
+                    },
+                    {
+                        'title': '来源IP',
+                        'dataIndex': 'request_ip',
+                        'width': 130,
+                    },
                     {
                         'title': '操作',
                         'dataIndex': 'operation',
@@ -122,7 +175,13 @@ def render(*args, **kwargs):
                 fac.AntdDescriptions(
                     id='callback-detail-descriptions', column=2, bordered=True
                 ),
-                fac.AntdDivider('原始回调报文'),
+                fac.AntdDivider('幂等与处理信息'),
+                fac.AntdDescriptions(
+                    id='callback-process-descriptions',
+                    column=2,
+                    bordered=True,
+                ),
+                fac.AntdDivider('原始回调报文（已脱敏）'),
                 html.Pre(
                     id='callback-payload-preview',
                     style={
@@ -134,7 +193,7 @@ def render(*args, **kwargs):
             ],
             id='callback-detail-modal',
             title='回调详情',
-            width=880,
+            width=920,
             renderFooter=False,
         ),
         fac.AntdModal(

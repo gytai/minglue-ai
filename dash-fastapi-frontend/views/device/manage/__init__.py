@@ -2,17 +2,23 @@ import feffery_antd_components as fac
 from dash import dcc, html
 
 from callbacks.device_c import manage_c
+from callbacks.device_c.device_page_logic import (
+    BIND_LABELS,
+    ONLINE_STATUS_LABELS,
+    STATUS_LABELS,
+)
 from utils.permission_util import PermissionManager
 
 
 STATUS_OPTIONS = [
-    {'label': '在线', 'value': 'online'},
-    {'label': '离线', 'value': 'offline'},
-    {'label': '已停用', 'value': 'disabled'},
+    {'label': label, 'value': value} for value, label in STATUS_LABELS.items()
 ]
 BIND_OPTIONS = [
-    {'label': '已绑定', 'value': 'bound'},
-    {'label': '未绑定', 'value': 'unbound'},
+    {'label': label, 'value': value} for value, label in BIND_LABELS.items()
+]
+ONLINE_STATUS_OPTIONS = [
+    {'label': label, 'value': value}
+    for value, label in ONLINE_STATUS_LABELS.items()
 ]
 
 
@@ -25,6 +31,9 @@ def render(*args, **kwargs):
         dcc.Store(id='device-modal-type-store'),
         dcc.Store(id='device-form-store'),
         dcc.Store(id='device-delete-ids-store'),
+        dcc.Store(id='device-detail-store'),
+        dcc.Store(id='device-recording-confirm-store'),
+        dcc.Store(id='device-command-store'),
         fac.AntdRow(
             fac.AntdCol(
                 [
@@ -36,7 +45,7 @@ def render(*args, **kwargs):
                                         id='device-code-search',
                                         placeholder='设备编码/SN',
                                         allowClear=True,
-                                        style={'width': 190},
+                                        style={'width': 180},
                                     ),
                                     label='设备编码',
                                 ),
@@ -45,7 +54,7 @@ def render(*args, **kwargs):
                                         id='device-name-search',
                                         placeholder='设备名称',
                                         allowClear=True,
-                                        style={'width': 180},
+                                        style={'width': 150},
                                     ),
                                     label='设备名称',
                                 ),
@@ -55,9 +64,29 @@ def render(*args, **kwargs):
                                         options=STATUS_OPTIONS,
                                         placeholder='全部状态',
                                         allowClear=True,
-                                        style={'width': 140},
+                                        style={'width': 130},
                                     ),
-                                    label='状态',
+                                    label='本地状态',
+                                ),
+                                fac.AntdFormItem(
+                                    fac.AntdSelect(
+                                        id='device-online-status-search',
+                                        options=ONLINE_STATUS_OPTIONS,
+                                        placeholder='全部',
+                                        allowClear=True,
+                                        style={'width': 130},
+                                    ),
+                                    label='心跳在线',
+                                ),
+                                fac.AntdFormItem(
+                                    fac.AntdSelect(
+                                        id='device-bind-status-search',
+                                        options=BIND_OPTIONS,
+                                        placeholder='全部',
+                                        allowClear=True,
+                                        style={'width': 120},
+                                    ),
+                                    label='绑定状态',
                                 ),
                                 fac.AntdFormItem(
                                     fac.AntdButton(
@@ -134,6 +163,32 @@ def render(*args, **kwargs):
                             )
                             else [],
                             fac.AntdButton(
+                                '同步配置',
+                                id={
+                                    'type': 'device-operation-button',
+                                    'index': 'sync-config',
+                                },
+                                icon=fac.AntdIcon(icon='antd-cloud-download'),
+                                disabled=True,
+                            )
+                            if PermissionManager.check_perms(
+                                'device:manage:control'
+                            )
+                            else [],
+                            fac.AntdButton(
+                                '指令结果',
+                                id={
+                                    'type': 'device-operation-button',
+                                    'index': 'command',
+                                },
+                                icon=fac.AntdIcon(icon='antd-file-search'),
+                                disabled=True,
+                            )
+                            if PermissionManager.check_perms(
+                                'device:manage:control'
+                            )
+                            else [],
+                            fac.AntdButton(
                                 '刷新',
                                 id='device-refresh',
                                 icon=fac.AntdIcon(icon='antd-sync'),
@@ -159,15 +214,26 @@ def render(*args, **kwargs):
                                     'title': '固件',
                                     'dataIndex': 'firmware_version',
                                 },
-                                {'title': '在线状态', 'dataIndex': 'status'},
+                                {
+                                    'title': '本地状态',
+                                    'dataIndex': 'status_display',
+                                },
+                                {
+                                    'title': '心跳在线',
+                                    'dataIndex': 'online_status_display',
+                                },
                                 {
                                     'title': '绑定状态',
-                                    'dataIndex': 'bind_status',
+                                    'dataIndex': 'bind_status_display',
                                 },
                                 {'title': '使用人', 'dataIndex': 'owner_name'},
                                 {
                                     'title': '电量',
                                     'dataIndex': 'battery_display',
+                                },
+                                {
+                                    'title': '充电状态',
+                                    'dataIndex': 'charged_status_display',
                                 },
                                 {
                                     'title': '录音状态',
@@ -177,7 +243,10 @@ def render(*args, **kwargs):
                                     'title': '存储空间',
                                     'dataIndex': 'storage_display',
                                 },
-                                {'title': '4G信号', 'dataIndex': 'signal_display'},
+                                {
+                                    'title': '4G信号',
+                                    'dataIndex': 'signal_display',
+                                },
                                 {
                                     'title': '最后在线',
                                     'dataIndex': 'last_seen_time',
@@ -186,7 +255,7 @@ def render(*args, **kwargs):
                                 {
                                     'title': '操作',
                                     'dataIndex': 'operation',
-                                    'width': 300,
+                                    'width': 320,
                                     'renderOptions': {'renderType': 'button'},
                                 },
                             ],
@@ -236,7 +305,7 @@ def render(*args, **kwargs):
                     ),
                     fac.AntdFormItem(
                         fac.AntdSelect(name='status', options=STATUS_OPTIONS),
-                        label='在线状态',
+                        label='本地状态',
                     ),
                     fac.AntdFormItem(
                         fac.AntdSelect(
@@ -280,6 +349,106 @@ def render(*args, **kwargs):
             mask=False,
             renderFooter=True,
             okClickClose=False,
+        ),
+        fac.AntdModal(
+            [
+                fac.AntdDescriptions(
+                    id='device-heartbeat-descriptions',
+                    column=3,
+                    bordered=True,
+                ),
+                fac.AntdDivider('厂商最新配置快照'),
+                fac.AntdDescriptions(
+                    id='device-config-descriptions',
+                    column=1,
+                    bordered=True,
+                ),
+            ],
+            id='device-detail-modal',
+            title='设备详情',
+            width=980,
+            renderFooter=False,
+        ),
+        fac.AntdModal(
+            fac.AntdForm(
+                [
+                    fac.AntdFormItem(
+                        fac.AntdInput(
+                            id='device-command-device-code',
+                            disabled=True,
+                            allowClear=True,
+                        ),
+                        label='设备编码',
+                    ),
+                    fac.AntdFormItem(
+                        fac.AntdInput(
+                            id='device-command-msg-id',
+                            placeholder='厂商返回的 msg_id，可留空按最近一条查询',
+                            allowClear=True,
+                        ),
+                        label='消息ID',
+                    ),
+                ],
+                labelCol={'span': 6},
+                wrapperCol={'span': 18},
+            ),
+            id='device-command-modal',
+            width=680,
+            renderFooter=True,
+            okClickClose=False,
+            title='指令结果查询',
+        ),
+        fac.AntdModal(
+            [
+                fac.AntdAlert(
+                    id='device-command-alert',
+                    type='info',
+                    showIcon=True,
+                    visible=False,
+                ),
+                fac.AntdDescriptions(
+                    id='device-command-descriptions',
+                    column=2,
+                    bordered=True,
+                ),
+                fac.AntdDivider('最近一次本地控制日志'),
+                fac.AntdTable(
+                    id='device-command-log-table',
+                    columns=[
+                        {'title': '指令', 'dataIndex': 'command_display'},
+                        {'title': '消息ID', 'dataIndex': 'msg_id'},
+                        {
+                            'title': '受理结果',
+                            'dataIndex': 'request_status_display',
+                        },
+                        {
+                            'title': '厂商状态',
+                            'dataIndex': 'remote_status_display',
+                        },
+                        {
+                            'title': '时间',
+                            'dataIndex': 'create_time',
+                            'width': 170,
+                        },
+                    ],
+                    size='small',
+                    bordered=True,
+                    pagination=False,
+                    style={'width': '100%'},
+                ),
+            ],
+            id='device-command-result-modal',
+            title='指令结果',
+            width=820,
+            renderFooter=False,
+        ),
+        fac.AntdModal(
+            fac.AntdText('是否确认停止该设备的录音？', id='device-stop-text'),
+            id='device-stop-confirm-modal',
+            visible=False,
+            title='停止录音确认',
+            renderFooter=True,
+            centered=True,
         ),
         fac.AntdModal(
             fac.AntdText('是否确认删除？', id='device-delete-text'),

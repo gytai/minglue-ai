@@ -34,13 +34,18 @@ class DeviceApi:
     @classmethod
     def sync_status(cls, sns: list[str]):
         return api_request(
-            url='/device/remote/status', method=ApiMethod.POST, json={'sns': sns}
+            url='/device/remote/status',
+            method=ApiMethod.POST,
+            json={'sns': sns},
         )
 
     @classmethod
-    def get_config_status(cls, sns: list[str]):
+    def sync_config(cls, sns: list[str]):
+        """批量拉取厂商最新配置状态并落本地快照（契约 §4.2 / C4）。"""
         return api_request(
-            url='/device/remote/config', method=ApiMethod.POST, json={'sns': sns}
+            url='/device/remote/config',
+            method=ApiMethod.POST,
+            json={'sns': sns},
         )
 
     @classmethod
@@ -60,7 +65,15 @@ class DeviceApi:
     @classmethod
     def get_command_log(cls, device_code: str, message_id: str):
         return api_request(
-            url=f'/device/{device_code}/command/{message_id}', method=ApiMethod.GET
+            url=f'/device/{device_code}/command/{message_id}',
+            method=ApiMethod.GET,
+        )
+
+    @classmethod
+    def list_control_logs(cls, query: dict):
+        """设备控制指令日志（含厂商 msg_id 与受理结果）。"""
+        return api_request(
+            url='/device/control/list', method=ApiMethod.GET, params=query
         )
 
     @classmethod

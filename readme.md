@@ -17,7 +17,7 @@
 - 回调接入：接受任意 JSON 回调，保留原始报文并自动提取常见设备字段。
 - 自动建档：未知设备首次上报时自动创建设备记录。
 - 幂等处理：存在事件 ID 时自动识别重复回调。
-- 回调审计：按设备、事件类型和时间范围查询原始回调日志。
+- 回调审计：按设备、事件类型、处理结果、重复标记和时间范围查询原始回调日志，详情展示幂等键与处理信息，报文预览自动脱敏。
 - 安全校验：配置回调密钥后支持 HMAC-SHA256 签名校验。
 - 权限菜单：设备管理和回调日志均接入现有菜单、角色与按钮权限体系。
 - 双数据库脚本：同时提供 MySQL 和 PostgreSQL 初始化 SQL。
@@ -93,8 +93,24 @@ MINGLUE_API_TIMEOUT=10
 ```text
 dash-fastapi-backend/module_device/       设备、回调后端模块
 dash-fastapi-frontend/views/device/       设备管理与回调日志页面
-dash-fastapi-frontend/callbacks/device_c/ 页面交互回调
+dash-fastapi-frontend/callbacks/device_c/ 页面交互回调（device_page_logic.py 为纯逻辑层）
 dash-fastapi-frontend/api/device.py       前端 API 封装
+dash-fastapi-frontend/tests/              前端回调/组件测试
 ```
 
 厂商接口对接代码位于 `module_device/service/minglue_api_service.py`，回调字段映射位于 `module_device/service/device_service.py`。
+
+## 测试
+
+```bash
+# 后端：数据模型、DAO、迁移与回调字段映射（内存 SQLite 装配，无需真实数据库）
+cd dash-fastapi-backend
+python3 -m pytest
+
+# 前端：页面纯逻辑、设备/回调回调、页面组件渲染与权限显隐，
+#       以及"前端按钮权限 ↔ 后端接口守卫 ↔ MySQL/PostgreSQL 种子数据"的一致性
+cd dash-fastapi-frontend
+python3 -m pytest
+```
+
+前端测试用轻量组件桩替换 `dash` / `feffery-antd-components`，因此在未安装前端运行时依赖的环境同样可运行；它覆盖回调层逻辑与页面结构，**不替代**浏览器端人工验收。

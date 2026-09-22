@@ -1,6 +1,6 @@
 # 明略 AIOT 接口契约盘点与现状差距分析
 
-- **文档版本**：v1.1
+- **文档版本**：v1.2
 - **文档更新时间**：2026-09-22
 - **对应 issue**：GYTAI-127（明略后台 1/6：接口规范盘点与现状差距分析）
 - **契约基线提交**：`agent/codex/gytai-123` 的 `3626af6` / `27ed2e8` / `18c2a91`
@@ -599,19 +599,25 @@ BODY: { "code": 0 }
 
 ### 5.6 前端
 
+> Stage 5（GYTAI-129）已按下表重做设备管理与回调日志两个页面，并补齐前端测试；
+> "现状"列已更新为 Stage 5 交付后的状态。页面逻辑集中在
+> `callbacks/device_c/device_page_logic.py`（纯函数，可脱网测试），回调层只负责
+> 取数与反馈。
+
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
-| E1 | 设备列表（搜索/分页/状态/详情/增删改） | `views/device/manage` + `callbacks/device_c/manage_c.py` 完整 | 已满足 | — |
-| E2 | 设备状态同步入口 | 已接入 `sync_status` | 已满足 | — |
-| E3 | 开启/停止录音入口 | 已接入 `start_recording` / `stop_recording` | 已满足 | — |
-| E4 | 配置状态同步入口 | `api/device.py` 已封装 `get_config_status`，**页面未接入** | 缺失 | P1 |
-| E5 | 指令结果查询入口 | `api/device.py` 已封装 `get_command_log`，**页面未接入** | 缺失 | P1 |
-| E6 | 完整心跳字段展示 | 列表仅展示 code/name/model/firmware/status/bind/owner/phone/department/battery/record/signal/storage/last_seen/remark；**未展示** `charged_status`、`key_status`、`usb_status`、`disk_mount_status`、`chip`、`ip_address`、`today_record_seconds`、`pending_recordings`、`tenant_id`、`audio_id`、`battery_voltage`、`battery_current` | 部分满足 | P1 |
-| E7 | 回调日志按设备/类型/时间/结果查询 | 已支持 `event_type`/`device_code`/`process_status`/`begin_time`/`end_time` | 已满足 | — |
-| E8 | 回调原始报文格式化查看 | 详情弹窗解析并格式化 `payload_json` | 已满足 | — |
-| E9 | 页面不泄露密钥/token | 未展示签名密钥或 token | 已满足 | — |
-| E10 | 加载/部分失败/超时/无权限反馈 | 控制操作有基础反馈；无"部分失败"专用反馈（后端也不返回逐设备结果） | 部分满足 | P1 |
-| E11 | 危险操作二次确认 | 删除有确认；停止录音未见明确确认 | 部分满足 | P2 |
+| E1 | 设备列表（搜索/分页/状态/详情/增删改） | `views/device/manage` + `callbacks/device_c/manage_c.py` 完整；筛选含编码/名称/本地状态/心跳三态/绑定状态，行内含详情、修改、删除 | 已满足 | — |
+| E2 | 设备状态同步入口 | 批量"同步状态"按钮接入 `sync_status`，按请求 SN 与返回 `entities` 求差集提示部分失败 | 已满足 | — |
+| E3 | 开启/停止录音入口 | "开始录音"直接下发并把厂商 `msg_id` 回显；"停止录音"先二次确认再下发 | 已满足 | — |
+| E4 | 配置状态同步入口 | 新增"同步配置"按钮，接入 `/device/remote/config`，同口径提示部分失败 | 已满足 | — |
+| E5 | 指令结果查询入口 | 新增"指令结果"按钮/弹窗：按设备取最近一条本地控制日志的 `msg_id`（或手工输入），同时展示厂商回执与本地受理日志 | 已满足 | — |
+| E6 | 完整心跳字段展示 | 列表新增充电状态/心跳在线；详情弹窗按契约 §3 逐字段展示 `charged_status`、`key_status`、`usb_status`、`disk_mount_status`、`chip`、`ip_address`、`today_record_seconds`、`pending_recordings`、`tenant_id`、`audio_id`、`battery_voltage`、`battery_current` 及配置快照 | 已满足 | — |
+| E7 | 回调日志按设备/类型/时间/结果查询 | 支持 `device_code`/`event_type`/`process_status`/`duplicate_flag`/`begin_time`+`end_time`（时间只有一端时不下发） | 已满足 | — |
+| E8 | 回调原始报文格式化查看 | 详情弹窗按"事件信息 / 幂等与处理信息 / 原始报文"三段展示，含 `dedup_key`、重复标记、签名校验、`session_id`、`item_count` | 已满足 | — |
+| E9 | 页面不泄露密钥/token | 报文预览与异常文案统一走 `sanitize_payload` / `mask_secret_text`：敏感键掩码、带签名 URL 只保留参数名 | 已满足 | — |
+| E10 | 加载/部分失败/超时/无权限反馈 | 批量同步按 SN 差集区分成功/部分失败/全部失败；后端异常按无权限/登录失效/超时/业务错误分别给文案；同步与录音操作按钮进入 loading | 已满足 | — |
+| E11 | 危险操作二次确认 | 删除与停止录音均有确认弹窗，未确认不下发 | 已满足 | — |
+| E12 | 菜单/角色/按钮权限两层一致 | 前端按钮判断的权限标识 ⊆ 后端 `CheckUserInterfaceAuth` 守卫；默认普通角色（role_id=2）补齐 `device:manage:control`/`device:recording:list`/`device:control:list`，两套库种子与迁移脚本等价 | 已满足 | — |
 
 ### 5.7 测试
 
@@ -624,7 +630,7 @@ BODY: { "code": 0 }
 | F5 | 重复事件 / 缺失字段 / 非法字段 / 签名错误测试 | **无** | 缺失 | P1 |
 | F6 | 厂商接口 mock 测试（token 刷新、错误映射、参数序列化） | **无** | 缺失 | P1 |
 | F7 | 数据库迁移 / 唯一约束 / 新旧库升级测试 | **无** | 缺失 | P1 |
-| F8 | 前端回调/组件测试 | **无** | 缺失 | P2 |
+| F8 | 前端回调/组件测试 | 已补 66 条：页面纯逻辑、设备管理回调、回调日志回调、页面组件渲染与权限显隐、前后端权限与双库种子的静态一致性（`dash-fastapi-frontend/tests/`，不依赖 dash 运行时） | 已满足 | — |
 | F9 | 测试可在干净环境被收集 | `config/database.py` 改为惰性建引擎；无 MySQL/PG 驱动时仍可收集并跑完 45 个测试 | 已满足（Stage 2） | — |
 
 #### F9 的实测复现
@@ -662,9 +668,9 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 - C9 批量同步部分失败语义
 - D2/D3 在线状态三态与超时离线兜底
 - D6 录音/转码/ASR 业务模型
-- E4/E5 前端缺失入口
-- E6 心跳字段展示完整性
-- E10 部分失败反馈
+- E4/E5 前端缺失入口 —— **Stage 5 已关闭**（配置同步、指令结果查询入口已接入）
+- E6 心跳字段展示完整性 —— **Stage 5 已关闭**（详情弹窗逐字段展示）
+- E10 部分失败反馈 —— **Stage 5 已关闭**（批量同步按 SN 差集提示，异常分级文案）
 - F4–F7 请求级/服务级/迁移测试
 - F9 测试无法在干净环境被收集（import 期建 async engine）
 
@@ -673,8 +679,8 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 - A7 业务错误码表
 - B15/B16 `session_id` / `topic_name` 留存
 - B17 其余回调响应体约定
-- E11 危险操作确认
-- F8 前端测试
+- E11 危险操作确认 —— **Stage 5 已关闭**（停止录音二次确认）
+- F8 前端测试 —— **Stage 5 已关闭**（`dash-fastapi-frontend/tests/`，66 条）
 
 ### 5.9 "文档不明确" 清单（不得靠猜字段名补齐）
 
@@ -759,3 +765,4 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | --- | --- | --- | --- |
 | v1.0 | 2026-09-22 | CodeBuddy（Stage 1） | 首次盘点：4 篇说明 + 6 个接口契约，8 类回调，差距矩阵与 P0/P1/P2 排序 |
 | v1.1 | 2026-09-22 | CodeBuddy（Stage 2） | 数据模型/DAO/迁移定稿：关闭 B6/B11/B12、D2/D3/D5/D6/D7、F9；新增 `ml_recording_file`、`ml_device_control_log`；新增可重复执行的双库迁移脚本；补 45 个模型/DAO/迁移测试 |
+| v1.2 | 2026-09-22 | CodeBuddy（Stage 5） | 前端页面与权限定稿：关闭 E1–E12、F8；设备页补齐详情/配置同步/录音确认/指令结果，回调页补齐四类筛选与脱敏报文；前端权限判断与后端守卫、双库种子静态对齐；补 66 条前端测试 |
