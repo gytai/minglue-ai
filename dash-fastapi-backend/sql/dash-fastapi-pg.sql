@@ -349,6 +349,7 @@ insert into sys_menu values(1063, '设备修改', 118, '3', '#', '', '', '', 1, 
 insert into sys_menu values(1064, '设备删除', 118, '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:manage:remove',       '#', 'admin', current_timestamp, '', null, '');
 insert into sys_menu values(1065, '回调查询', 119, '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:query',      '#', 'admin', current_timestamp, '', null, '');
 insert into sys_menu values(1066, '回调删除', 119, '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:remove',     '#', 'admin', current_timestamp, '', null, '');
+insert into sys_menu values(1067, '设备控制', 118, '5', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:manage:control',      '#', 'admin', current_timestamp, '', null, '');
 
 -- ----------------------------
 -- 6、用户和角色关联表  用户N-1角色
@@ -992,6 +993,21 @@ create table ml_device (
     department varchar(100) default '',
     battery_level int4,
     signal_strength int4,
+    record_status int4,
+    remain_storage int8,
+    total_storage int8,
+    battery_voltage int4,
+    battery_current int4,
+    charged_status varchar(30),
+    key_status int4,
+    usb_status int4,
+    disk_mount_status int4,
+    chip varchar(100),
+    ip_address varchar(64),
+    today_record_seconds int4,
+    pending_recordings int4,
+    tenant_id int8,
+    audio_id varchar(100),
     last_seen_time timestamp(0),
     activated_at timestamp(0),
     config_json text,

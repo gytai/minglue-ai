@@ -13,6 +13,7 @@ from module_device.entity.vo.device_vo import (
     DeviceModel,
     DevicePageQueryModel,
 )
+from module_device.service.minglue_api_service import MinglueApiService
 
 
 class DeviceService:
@@ -70,12 +71,56 @@ class DeviceService:
             await db.rollback()
             raise
 
+    @classmethod
+    async def sync_remote_statuses(cls, db: AsyncSession, sns: list[str]):
+        result = await MinglueApiService.get_device_statuses(sns)
+        entities = result.get('entities', []) if isinstance(result, dict) else []
+        if not isinstance(entities, list):
+            raise ServiceException(message='批量获取设备状态失败：响应 entities 格式不正确')
+        try:
+            for entity in entities:
+                if isinstance(entity, dict) and entity.get('sn'):
+                    event_time = CallbackService._parse_datetime(entity.get('update_time'))
+                    await CallbackService._upsert_device(
+                        db,
+                        str(entity['sn']),
+                        'heartbeat',
+                        entity,
+                        event_time,
+                    )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        return {'entities': entities, 'synced': len(entities)}
+
 
 class CallbackService:
     DEVICE_CODE_KEYS = ('device_code', 'deviceCode', 'device_id', 'deviceId', 'deviceSn', 'sn', 'imei')
-    EVENT_ID_KEYS = ('event_id', 'eventId', 'message_id', 'messageId', 'requestId', 'request_id')
-    EVENT_TYPE_KEYS = ('event_type', 'eventType', 'type', 'action', 'topic')
-    EVENT_TIME_KEYS = ('event_time', 'eventTime', 'timestamp', 'time', 'occurTime')
+    EVENT_ID_KEYS = (
+        'event_id',
+        'eventId',
+        'message_id',
+        'messageId',
+        'requestId',
+        'request_id',
+        'task_id',
+        'asrTskId',
+        'object_key',
+        'objectKey',
+        'asrTextObjectKey',
+    )
+    EVENT_TYPE_KEYS = ('event_type', 'eventType', 'type', 'logType', 'log_type', 'action', 'topic')
+    EVENT_TIME_KEYS = (
+        'event_time',
+        'eventTime',
+        'update_time',
+        'updatedAt',
+        'merge_success_time',
+        'timestamp',
+        'time',
+        'occurTime',
+    )
 
     @staticmethod
     def _first(payload: Dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -84,6 +129,10 @@ class CallbackService:
             value = payload.get(name)
             if isinstance(value, dict):
                 containers.append(value)
+        for name in ('content', 'files', 'entities'):
+            value = payload.get(name)
+            if isinstance(value, list):
+                containers.extend(item for item in value if isinstance(item, dict))
         for container in containers:
             for key in keys:
                 value = container.get(key)
@@ -113,6 +162,8 @@ class CallbackService:
         path_event_type: Optional[str],
         request_ip: Optional[str],
     ):
+        event_type_value = path_event_type or cls._first(payload, cls.EVENT_TYPE_KEYS) or cls._infer_event_type(payload)
+        event_type = str(event_type_value)[:100]
         event_id_value = cls._first(payload, cls.EVENT_ID_KEYS)
         event_id = str(event_id_value) if event_id_value not in (None, '') else None
         if event_id:
@@ -120,15 +171,15 @@ class CallbackService:
             if existing:
                 return {'callback_id': existing.callback_id, 'duplicate': True}
 
-        device_code_value = cls._first(payload, cls.DEVICE_CODE_KEYS)
-        device_code = str(device_code_value) if device_code_value not in (None, '') else None
-        event_type_value = path_event_type or cls._first(payload, cls.EVENT_TYPE_KEYS) or 'unknown'
-        event_type = str(event_type_value)[:100]
+        device_code_values = cls._device_codes(payload)
+        device_code = device_code_values[0] if device_code_values else None
         event_time = cls._parse_datetime(cls._first(payload, cls.EVENT_TIME_KEYS))
 
         try:
-            if device_code:
-                await cls._upsert_device(db, device_code, event_type, payload, event_time)
+            for current_code in device_code_values:
+                device_payload = cls._payload_for_device(payload, current_code)
+                device_event_time = cls._parse_datetime(cls._first(device_payload, cls.EVENT_TIME_KEYS)) or event_time
+                await cls._upsert_device(db, current_code, event_type, device_payload, device_event_time)
             callback = await CallbackDao.add(
                 db,
                 {
@@ -150,6 +201,53 @@ class CallbackService:
             raise
 
     @classmethod
+    def _device_codes(cls, payload: Dict[str, Any]) -> list[str]:
+        values = []
+        direct_payload = {
+            key: value for key, value in payload.items() if key not in ('content', 'files', 'entities')
+        }
+        direct = cls._first(direct_payload, cls.DEVICE_CODE_KEYS)
+        if direct not in (None, ''):
+            values.append(str(direct))
+        for name in ('content', 'files', 'entities'):
+            items = payload.get(name)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = cls._first(item, cls.DEVICE_CODE_KEYS)
+                if value not in (None, ''):
+                    values.append(str(value))
+        return list(dict.fromkeys(values))
+
+    @staticmethod
+    def _infer_event_type(payload: Dict[str, Any]) -> str:
+        if 'device_status' in payload and 'update_time' in payload:
+            return 'heartbeat'
+        if 'asrTextResultList' in payload or 'asrTextObjectKey' in payload:
+            return 'asr'
+        if 'files' in payload and 'group_key' in payload:
+            return 'fc'
+        return 'unknown'
+
+    @classmethod
+    def _payload_for_device(cls, payload: Dict[str, Any], device_code: str) -> Dict[str, Any]:
+        merged = dict(payload)
+        for name in ('content', 'files', 'entities'):
+            items = payload.get(name)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = cls._first(item, cls.DEVICE_CODE_KEYS)
+                if value not in (None, '') and str(value) == device_code:
+                    merged.update(item)
+                    return merged
+        return merged
+
+    @classmethod
     async def _upsert_device(
         cls,
         db: AsyncSession,
@@ -160,44 +258,87 @@ class CallbackService:
     ):
         device = await DeviceDao.get_by_code(db, device_code)
         event_name = event_type.lower()
-        status = 'offline' if any(word in event_name for word in ('offline', 'disconnect', 'logout')) else 'online'
+        online_value = cls._first(payload, ('online',))
+        device_status = cls._first(payload, ('device_status', 'deviceStatus'))
+        if online_value is not None:
+            status = 'online' if cls._as_int(online_value) in (1, 2) else 'offline'
+        elif device_status is not None:
+            status = 'online' if cls._as_int(device_status) == 1 else 'offline'
+        else:
+            status = 'offline' if any(word in event_name for word in ('offline', 'disconnect', 'logout')) else 'online'
         now = event_time or datetime.now()
-        battery = cls._first(payload, ('battery', 'batteryLevel', 'battery_level', 'power'))
+        battery = cls._first(payload, ('remain_power', 'battery', 'batteryLevel', 'battery_level', 'power', 'rsoc'))
         signal = cls._first(payload, ('signal', 'signalStrength', 'signal_strength', 'rssi'))
-        firmware = cls._first(payload, ('firmware', 'firmwareVersion', 'firmware_version', 'version'))
+        firmware = cls._first(payload, ('firmware', 'firmwareVersion', 'firmware_version', 'version', 'v'))
+        telemetry_fields = {
+            'record_status': ('record_status', 'rec'),
+            'remain_storage': ('remain_storage', 'df'),
+            'total_storage': ('total_storage', 'total_df'),
+            'battery_voltage': ('battery_voltage', 'vbat'),
+            'battery_current': ('battery_current', 'ibat'),
+            'key_status': ('key_status', 'key'),
+            'usb_status': ('usb_status', 'usb'),
+            'disk_mount_status': ('disk_mount_status', 'mnt'),
+            'today_record_seconds': ('rectd',),
+            'pending_recordings': ('recnu',),
+            'tenant_id': ('tenant_id',),
+        }
+        values = {
+            'status': status,
+            'last_seen_time': now,
+            'update_time': datetime.now(),
+            'config_json': json.dumps(payload, ensure_ascii=False, default=str),
+        }
+        if battery is not None:
+            parsed = cls._as_int(battery)
+            if parsed is not None:
+                values['battery_level'] = max(0, min(100, parsed))
+        if signal is not None:
+            parsed = cls._as_int(signal)
+            if parsed is not None:
+                values['signal_strength'] = parsed
+        if firmware is not None:
+            values['firmware_version'] = str(firmware)[:100]
+        for field, keys in telemetry_fields.items():
+            parsed = cls._as_int(cls._first(payload, keys))
+            if parsed is not None:
+                values[field] = parsed
+        text_fields = {
+            'charged_status': ('charged_status', 'chg'),
+            'chip': ('chip',),
+            'ip_address': ('cip', 'ip'),
+            'audio_id': ('nm',),
+        }
+        for field, keys in text_fields.items():
+            value = cls._first(payload, keys)
+            if value not in (None, ''):
+                values[field] = str(value)[:100]
         if device:
-            values = {
-                'device_id': device.device_id,
-                'status': status,
-                'last_seen_time': now,
-                'update_time': datetime.now(),
-            }
-            if battery is not None:
-                try:
-                    values['battery_level'] = max(0, min(100, int(float(battery))))
-                except (TypeError, ValueError):
-                    pass
-            if signal is not None:
-                try:
-                    values['signal_strength'] = int(float(signal))
-                except (TypeError, ValueError):
-                    pass
-            if firmware is not None:
-                values['firmware_version'] = str(firmware)[:100]
+            values['device_id'] = device.device_id
+            if device.status == 'disabled':
+                values['status'] = 'disabled'
             await DeviceDao.update(db, values)
         else:
+            values.update(
+                device_code=device_code,
+                device_name=device_code,
+                activated_at=now,
+                create_by='callback',
+                update_by='callback',
+            )
             await DeviceDao.add(
                 db,
-                DeviceModel(
-                    device_code=device_code,
-                    device_name=device_code,
-                    status=status,
-                    last_seen_time=now,
-                    activated_at=now,
-                    create_by='callback',
-                    update_by='callback',
-                ),
+                DeviceModel(**values),
             )
+
+    @staticmethod
+    def _as_int(value: Any) -> Optional[int]:
+        if value in (None, ''):
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     async def get_list(cls, db: AsyncSession, query: CallbackPageQueryModel):

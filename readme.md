@@ -6,6 +6,8 @@
 
 - 设备台账：设备新增、编辑、删除、搜索和分页查询。
 - 运行状态：在线/离线/停用、绑定状态、电量、信号、固件版本和最后在线时间。
+- 厂商设备控制：批量同步状态/配置、开始和停止录音、查询指令接收结果。
+- 完整心跳：录音、存储、电压、电流、充电、USB、磁盘、芯片、IP 和待上传录音数。
 - 回调接入：接受任意 JSON 回调，保留原始报文并自动提取常见设备字段。
 - 自动建档：未知设备首次上报时自动创建设备记录。
 - 幂等处理：存在事件 ID 时自动识别重复回调。
@@ -22,7 +24,7 @@ POST /open/minglue/callback/{event_type}
 Content-Type: application/json
 ```
 
-回调接入采用兼容模式，支持从顶层或 `data`、`body`、`payload`、`device` 对象中识别以下常见字段：
+回调接入已按厂商文档适配 `rec`、`op`、`sys`、`reclist`、`log`、`fc`、`asr` 和设备心跳，成功响应严格为 `{"code": 0}`。同时保留兼容模式，支持从顶层、`content` 列表或 `data`、`body`、`payload`、`device` 对象中识别以下字段：
 
 | 语义 | 兼容字段 |
 | --- | --- |
@@ -30,6 +32,8 @@ Content-Type: application/json
 | 事件 ID | `event_id`、`eventId`、`message_id`、`messageId`、`requestId` |
 | 事件类型 | `event_type`、`eventType`、`type`、`action`、`topic` |
 | 事件时间 | `event_time`、`eventTime`、`timestamp`、`time`、`occurTime` |
+
+心跳会按厂商字段更新设备台账，包括 `remain_power`、`rssi`、`update_time`、`version`、`record_status`、`remain_storage`、`battery_voltage`、`battery_current`、`charged_status`、`usb_status`、`disk_mount_status`、`rectd`、`recnu` 和 `nm`。
 
 若设置环境变量 `MINGLUE_CALLBACK_SECRET`，调用方需发送 `X-Signature` 或 `X-Callback-Signature` 请求头，值为原始请求体的 HMAC-SHA256 十六进制摘要（可带 `sha256=` 前缀）。
 
@@ -63,6 +67,21 @@ python3 app.py --env=dev
 
 默认管理端地址为 `http://127.0.0.1:8088`，默认账号为 `admin / admin123`，后端 OpenAPI 地址为 `http://127.0.0.1:9099/docs`。
 
+## 明略 AIOT 接口配置
+
+设备状态同步和录音控制会先调用 `/thiea/site/accountLogin` 获取 token，密码按照厂商要求使用 AES-128-ECB + PKCS7 加密。配置以下环境变量：
+
+```text
+MINGLUE_API_BASE_URL=https://aiot-dev.mlamp.cn
+MINGLUE_API_USERNAME=厂商分配的用户名
+MINGLUE_API_PASSWORD=明文密码（仅保存在安全环境变量中）
+MINGLUE_API_AES_KEY=厂商提供的16字节密钥
+MINGLUE_API_AUTH_SCHEME=Bearer
+MINGLUE_API_TIMEOUT=10
+```
+
+若现场接口要求直接传 token 而不是 `Bearer token`，将 `MINGLUE_API_AUTH_SCHEME` 设置为空字符串。
+
 ## 目录说明
 
 ```text
@@ -72,4 +91,4 @@ dash-fastapi-frontend/callbacks/device_c/ 页面交互回调
 dash-fastapi-frontend/api/device.py       前端 API 封装
 ```
 
-当前 Apifox 分享页需要密码访问，因此回调层先按兼容模式实现并完整留存原始报文。取得文档访问权限后，可在 `module_device/service/device_service.py` 中补充精确字段映射，而无需调整存储和管理页面结构。
+厂商接口对接代码位于 `module_device/service/minglue_api_service.py`，回调字段映射位于 `module_device/service/device_service.py`。

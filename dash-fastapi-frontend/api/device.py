@@ -1,3 +1,5 @@
+from typing import Optional
+
 from config.enums import ApiMethod
 from utils.request import api_request
 
@@ -28,6 +30,38 @@ class DeviceApi:
     @classmethod
     def delete_devices(cls, device_ids: str):
         return api_request(url=f'/device/{device_ids}', method=ApiMethod.DELETE)
+
+    @classmethod
+    def sync_status(cls, sns: list[str]):
+        return api_request(
+            url='/device/remote/status', method=ApiMethod.POST, json={'sns': sns}
+        )
+
+    @classmethod
+    def get_config_status(cls, sns: list[str]):
+        return api_request(
+            url='/device/remote/config', method=ApiMethod.POST, json={'sns': sns}
+        )
+
+    @classmethod
+    def start_recording(cls, device_code: str, audio_id: Optional[str] = None):
+        return api_request(
+            url=f'/device/{device_code}/recording/start',
+            method=ApiMethod.POST,
+            json={'audio_id': audio_id},
+        )
+
+    @classmethod
+    def stop_recording(cls, device_code: str):
+        return api_request(
+            url=f'/device/{device_code}/recording/stop', method=ApiMethod.POST
+        )
+
+    @classmethod
+    def get_command_log(cls, device_code: str, message_id: str):
+        return api_request(
+            url=f'/device/{device_code}/command/{message_id}', method=ApiMethod.GET
+        )
 
     @classmethod
     def list_callbacks(cls, query: dict):

@@ -121,6 +121,19 @@ def render(*args, **kwargs):
                             )
                             else [],
                             fac.AntdButton(
+                                '同步状态',
+                                id={
+                                    'type': 'device-operation-button',
+                                    'index': 'sync',
+                                },
+                                icon=fac.AntdIcon(icon='antd-cloud-sync'),
+                                disabled=True,
+                            )
+                            if PermissionManager.check_perms(
+                                'device:manage:control'
+                            )
+                            else [],
+                            fac.AntdButton(
                                 '刷新',
                                 id='device-refresh',
                                 icon=fac.AntdIcon(icon='antd-sync'),
@@ -157,6 +170,15 @@ def render(*args, **kwargs):
                                     'dataIndex': 'battery_display',
                                 },
                                 {
+                                    'title': '录音状态',
+                                    'dataIndex': 'record_status_display',
+                                },
+                                {
+                                    'title': '存储空间',
+                                    'dataIndex': 'storage_display',
+                                },
+                                {'title': '4G信号', 'dataIndex': 'signal_display'},
+                                {
                                     'title': '最后在线',
                                     'dataIndex': 'last_seen_time',
                                     'width': 170,
@@ -164,7 +186,7 @@ def render(*args, **kwargs):
                                 {
                                     'title': '操作',
                                     'dataIndex': 'operation',
-                                    'width': 160,
+                                    'width': 300,
                                     'renderOptions': {'renderType': 'button'},
                                 },
                             ],

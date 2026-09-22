@@ -32,10 +32,32 @@ def generate_device_table(query_params: dict):
             if item.get('battery_level') is not None
             else '-'
         )
+        item['record_status_display'] = (
+            '录音中' if item.get('record_status') == 1 else '空闲'
+            if item.get('record_status') == 0
+            else '-'
+        )
+        item['storage_display'] = (
+            f'{item["remain_storage"]}/{item["total_storage"]} MB'
+            if item.get('remain_storage') is not None
+            and item.get('total_storage') is not None
+            else '-'
+        )
+        item['signal_display'] = (
+            str(item['signal_strength'])
+            if item.get('signal_strength') is not None
+            else '-'
+        )
         item['last_seen_time'] = TimeFormatUtil.format_time(
             item.get('last_seen_time')
         )
         item['operation'] = [
+            {'content': '开始录音', 'type': 'link', 'icon': 'antd-audio'}
+            if PermissionManager.check_perms('device:manage:control')
+            else {},
+            {'content': '停止录音', 'type': 'link', 'icon': 'antd-pause-circle'}
+            if PermissionManager.check_perms('device:manage:control')
+            else {},
             {'content': '修改', 'type': 'link', 'icon': 'antd-edit'}
             if PermissionManager.check_perms('device:manage:edit')
             else {},
@@ -110,6 +132,16 @@ app.clientside_callback(
         Output('device-operations-store', 'data'),
     ],
     Input('device-reset', 'nClicks'),
+    prevent_initial_call=True,
+)
+
+
+app.clientside_callback(
+    """
+    (selected) => selected?.length > 0 ? false : true
+    """,
+    Output({'type': 'device-operation-button', 'index': 'sync'}, 'disabled'),
+    Input('device-list-table', 'selectedRowKeys'),
     prevent_initial_call=True,
 )
 
@@ -298,3 +330,44 @@ def confirm_delete(ok, ids):
     DeviceApi.delete_devices(ids)
     MessageManager.success(content='删除成功')
     return {'type': 'delete'}
+
+
+@app.callback(
+    Output('device-operations-store', 'data', allow_duplicate=True),
+    [
+        Input({'type': 'device-operation-button', 'index': 'sync'}, 'nClicks'),
+        Input('device-list-table', 'nClicksButton'),
+    ],
+    [
+        State('device-list-table', 'selectedRowKeys'),
+        State('device-list-table', 'data'),
+        State('device-list-table', 'clickedContent'),
+        State('device-list-table', 'recentlyButtonClickedRow'),
+    ],
+    prevent_initial_call=True,
+)
+def run_remote_device_action(sync_click, row_click, selected, table_data, clicked, row):
+    trigger = ctx.triggered_id
+    if trigger == {'type': 'device-operation-button', 'index': 'sync'}:
+        selected_ids = set(selected or [])
+        sns = [
+            item['device_code']
+            for item in (table_data or [])
+            if str(item.get('key')) in selected_ids
+        ]
+        if not sns:
+            raise PreventUpdate
+        result = DeviceApi.sync_status(sns).get('data', {})
+        MessageManager.success(content=f'已同步 {result.get("synced", 0)} 台设备状态')
+        return {'type': 'sync'}
+    if trigger == 'device-list-table' and clicked in ('开始录音', '停止录音'):
+        device_code = row['device_code']
+        if clicked == '开始录音':
+            audio_id = uuid.uuid4().hex[:10]
+            DeviceApi.start_recording(device_code, audio_id)
+            MessageManager.success(content=f'开始录音指令已发送，音频ID：{audio_id}')
+        else:
+            DeviceApi.stop_recording(device_code)
+            MessageManager.success(content='停止录音指令已发送')
+        return {'type': clicked, 'device_code': device_code}
+    raise PreventUpdate

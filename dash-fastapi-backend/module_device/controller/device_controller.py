@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.enums import BusinessType
@@ -16,10 +17,13 @@ from module_admin.service.login_service import LoginService
 from module_device.entity.vo.device_vo import (
     CallbackPageQueryModel,
     DeleteDeviceModel,
+    DeviceBatchModel,
     DeviceModel,
     DevicePageQueryModel,
+    StartRecordingModel,
 )
 from module_device.service.device_service import CallbackService, DeviceService
+from module_device.service.minglue_api_service import MinglueApiService
 from utils.page_util import PageResponseModel
 from utils.response_util import ResponseUtil
 
@@ -77,6 +81,56 @@ async def delete_device(request: Request, device_ids: str, query_db: AsyncSessio
     return ResponseUtil.success(msg=result.message)
 
 
+@deviceController.post(
+    '/remote/status', dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))]
+)
+@Log(title='设备状态同步', business_type=BusinessType.UPDATE)
+async def sync_remote_status(
+    request: Request,
+    command: DeviceBatchModel,
+    query_db: AsyncSession = Depends(get_db),
+):
+    result = await DeviceService.sync_remote_statuses(query_db, command.sns)
+    return ResponseUtil.success(data=result)
+
+
+@deviceController.post(
+    '/remote/config', dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))]
+)
+async def get_remote_config(command: DeviceBatchModel):
+    result = await MinglueApiService.get_device_config_statuses(command.sns)
+    return ResponseUtil.success(data=result)
+
+
+@deviceController.post(
+    '/{device_code}/recording/start',
+    dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))],
+)
+@Log(title='开启设备录音', business_type=BusinessType.UPDATE)
+async def start_device_recording(request: Request, device_code: str, command: StartRecordingModel):
+    result = await MinglueApiService.start_recording(device_code, command.audio_id)
+    return ResponseUtil.success(data=result)
+
+
+@deviceController.post(
+    '/{device_code}/recording/stop',
+    dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))],
+)
+@Log(title='停止设备录音', business_type=BusinessType.UPDATE)
+async def stop_device_recording(request: Request, device_code: str):
+    result = await MinglueApiService.stop_recording(device_code)
+    return ResponseUtil.success(data=result)
+
+
+@deviceController.get(
+    '/{device_code}/command/{message_id}',
+    dependencies=[Depends(CheckUserInterfaceAuth('device:manage:control'))],
+)
+async def get_device_command_log(device_code: str, message_id: str):
+    result = await MinglueApiService.get_command_log(device_code, message_id)
+    return ResponseUtil.success(data=result)
+
+
 @deviceController.get(
     '/callback/list',
     response_model=PageResponseModel,
@@ -127,5 +181,5 @@ async def receive_callback(
     if not _verify_signature(await request.body(), x_signature or x_callback_signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='回调签名校验失败')
     request_ip = request.headers.get('X-Forwarded-For') or (request.client.host if request.client else None)
-    result = await CallbackService.receive(query_db, payload, event_type, request_ip)
-    return ResponseUtil.success(data=result)
+    await CallbackService.receive(query_db, payload, event_type, request_ip)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={'code': 0})

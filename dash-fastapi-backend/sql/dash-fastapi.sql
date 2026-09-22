@@ -267,6 +267,7 @@ insert into sys_menu values('1063', '设备修改', '118', '3', '#', '', '', '',
 insert into sys_menu values('1064', '设备删除', '118', '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:manage:remove',       '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1065', '回调查询', '119', '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:query',      '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1066', '回调删除', '119', '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:callback:remove',     '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1067', '设备控制', '118', '5', '#', '', '', '', 1, 0, 'F', '0', '0', 'device:manage:control',      '#', 'admin', sysdate(), '', null, '');
 
 
 -- ----------------------------
@@ -747,6 +748,21 @@ create table ml_device (
   department varchar(100) default '' comment '所属部门',
   battery_level int default null comment '电量百分比',
   signal_strength int default null comment '信号强度',
+  record_status int default null comment '录音状态',
+  remain_storage bigint default null comment '剩余存储空间MB',
+  total_storage bigint default null comment '总存储空间MB',
+  battery_voltage int default null comment '电池电压mV',
+  battery_current int default null comment '电池电流mA',
+  charged_status varchar(30) default null comment '充电状态',
+  key_status int default null comment '开关键状态',
+  usb_status int default null comment 'USB状态',
+  disk_mount_status int default null comment '磁盘挂载状态',
+  chip varchar(100) default null comment '芯片类型',
+  ip_address varchar(64) default null comment '设备IP',
+  today_record_seconds int default null comment '当日录音秒数',
+  pending_recordings int default null comment '待上传录音数',
+  tenant_id bigint default null comment '厂商租户ID',
+  audio_id varchar(100) default null comment 'API录音标识',
   last_seen_time datetime default null comment '最后在线时间',
   activated_at datetime default null comment '激活时间',
   config_json text default null comment '设备扩展配置JSON',
