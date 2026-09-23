@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions.exception import ServiceException
@@ -500,6 +501,10 @@ class CallbackService:
             try:
                 existing = await CallbackDao.get_by_dedup_key(db, dedup_key)
                 if existing:
+                    # 提交前先把主键取出来：commit 之后 ORM 实例属性可能已过期，
+                    # 再读 `existing.callback_id` 会触发惰性刷新（异步会话下即
+                    # MissingGreenlet），使重复回调被误记为处理失败。
+                    existing_callback_id = existing.callback_id
                     # 重复回调仍留痕：新增一条 duplicate_flag='Y' 的审计记录，
                     # 但不重复触发设备状态更新。
                     await CallbackDao.add(
@@ -517,7 +522,7 @@ class CallbackService:
                     )
                     await db.commit()
                     if len(items) == 1:
-                        return {'callback_id': existing.callback_id, 'duplicate': True}
+                        return {'callback_id': existing_callback_id, 'duplicate': True}
                     continue
                 callback = await CallbackDao.add(
                     db,
@@ -610,8 +615,17 @@ class CallbackService:
 
     @staticmethod
     def _is_duplicate_conflict(exc: Exception) -> bool:
+        """判断异常是否为幂等键唯一约束冲突（并发重推时的正常竞争）。
+
+        必须**先按异常类型**判断，不能对异常文本做裸子串匹配：ORM 报错会回显
+        整条 SELECT 的列清单，其中含 ``duplicate_flag`` 列名，裸匹配 'duplicate'
+        会把任何报错（例如 MissingGreenlet）都误判成"幂等冲突"而静默吞掉，
+        真实故障因此既不返回错误、也不留在可读的审计信息里。
+        """
+        if isinstance(exc, IntegrityError):
+            return True
         text = str(exc).lower()
-        return 'duplicate' in text or 'uniqueviolation' in text or 'integrityerror' in text
+        return 'uniqueviolation' in text or 'duplicate entry' in text or 'duplicate key' in text
 
     @classmethod
     async def _apply_item(

@@ -125,7 +125,10 @@ class CallbackDao:
         statement = (
             select(MinglueCallbackLog)
             .where(
-                MinglueCallbackLog.event_type.like(f'%{query.event_type}%') if query.event_type else True,
+                # event_type 是契约 §2 的封闭枚举（rec/op/sys/reclist/upload/fc/asr/heartbeat），
+                # 前端按固定选项筛选，必须精确匹配：子串匹配会让 `rec` 同时命中 `reclist`，
+                # 与 process_status / duplicate_flag / session_id 的精确语义也不一致。
+                MinglueCallbackLog.event_type == query.event_type if query.event_type else True,
                 MinglueCallbackLog.device_code.like(f'%{query.device_code}%') if query.device_code else True,
                 MinglueCallbackLog.process_status == query.process_status if query.process_status else True,
                 MinglueCallbackLog.duplicate_flag == query.duplicate_flag if query.duplicate_flag else True,

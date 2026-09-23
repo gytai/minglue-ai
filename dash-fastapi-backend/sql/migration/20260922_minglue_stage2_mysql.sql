@@ -133,6 +133,33 @@ call ml_add_index_if_absent('ml_callback_log', 'idx_ml_callback_event_id', '`eve
 call ml_add_index_if_absent('ml_callback_log', 'idx_ml_callback_device_type', '`device_code`, `event_type`');
 call ml_add_index_if_absent('ml_callback_log', 'idx_ml_callback_status_received', '`process_status`, `received_at`');
 
+-- dedup_key 在初始化脚本里是 `not null` 且无显式默认值；迁移是先加列（带 default ''）
+-- 再回填，这里把默认值去掉，使升级库与新建库的列定义完全一致。
+alter table ml_callback_log alter column dedup_key drop default;
+
+-- event_id 扩宽到 varchar(255)。Stage 2 起 event_id 承载 rec 回调的 object_key
+-- （对应 ml_recording_file.object_key 为 varchar(500)），文档样例的文件名已接近 128 字符；
+-- 若只在初始化脚本里改宽、迁移脚本漏改，升级库插入长录音文件名会报
+-- "Data too long for column 'event_id'"，导致整条回调落库失败并被厂商重推。
+alter table ml_callback_log
+    modify column event_id varchar(255) default null comment '上游业务唯一键（无业务键时为 NULL）';
+
+-- 老的 device_code 单列索引已被 (device_code, event_type) 联合索引覆盖，删除以免重复索引
+set @ml_ddl = (
+    select if(
+        exists (
+            select 1 from information_schema.statistics
+            where table_schema = database() and table_name = 'ml_callback_log'
+              and index_name = 'idx_ml_callback_device'
+        ),
+        'alter table ml_callback_log drop index idx_ml_callback_device',
+        'select 1'
+    )
+);
+prepare ml_stmt from @ml_ddl;
+execute ml_stmt;
+deallocate prepare ml_stmt;
+
 -- ---------------------------------------------------------------------------
 -- 3、新增业务表：录音/转码/ASR 产物、设备控制指令日志
 -- ---------------------------------------------------------------------------

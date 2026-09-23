@@ -69,6 +69,16 @@ create index if not exists idx_ml_callback_event_id on ml_callback_log(event_id)
 create index if not exists idx_ml_callback_device_type on ml_callback_log(device_code, event_type);
 create index if not exists idx_ml_callback_status_received on ml_callback_log(process_status, received_at);
 
+-- event_id 扩宽到 varchar(255)。Stage 2 起 event_id 承载 rec 回调的 object_key
+-- （对应 ml_recording_file.object_key 为 varchar(500)），文档样例的文件名已接近 128 字符；
+-- 若只在初始化脚本里改宽、迁移脚本漏改，升级库插入长录音文件名会报
+-- "value too long for type character varying(128)"，导致整条回调落库失败并被厂商重推。
+-- 加宽 varchar 在 PostgreSQL 中只改元数据、不重写表。
+alter table ml_callback_log alter column event_id type varchar(255);
+
+-- 老的 device_code 单列索引已被 (device_code, event_type) 联合索引覆盖，删除以免重复索引
+drop index if exists idx_ml_callback_device;
+
 -- ---------------------------------------------------------------------------
 -- 3、新增业务表：录音/转码/ASR 产物、设备控制指令日志
 -- ---------------------------------------------------------------------------
