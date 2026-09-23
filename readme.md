@@ -29,10 +29,12 @@
 Python 3.10+（已在 3.12 验证）、MySQL 5.7+ 或 PostgreSQL 9.6+、Redis。
 
 ```bash
-# MySQL
+# 默认 (MySQL)
 pip3 install -r requirements.txt
 
-# PostgreSQL（把 asyncmy/PyMySQL 换成 asyncpg/psycopg2）
+# PostgreSQL 分支 (asyncmy/PyMySQL 换成 asyncpg/psycopg2)
+pip3 install -r requirements.txt
+pip3 uninstall -y asyncmy PyMySQL
 pip3 install -r requirements-pg.txt
 ```
 
@@ -58,20 +60,256 @@ pip3 install -r requirements-pg.txt
    按「环境变量参考」一节填写数据库、Redis、服务地址与厂商凭证。生产环境请从密钥管理系统
    注入敏感值，不要写进仓库。
 
-3. **启动**
+3. **启动（开发模式）**：在仓库根目录运行对应脚本。脚本会**自动**在根目录创建
+   `.venv` 虚拟环境、按需安装前后端依赖、再切到对应模块目录启动服务。前后端**共用同一
+   个 venv**，避免双环境带来的版本漂移。
 
    ```bash
-   # 后端（默认 9099）
-   cd dash-fastapi-backend && python3 app.py --env=dev
+   # 后端 - 默认 9099, dev 下启用 hot reload
+   ./start_backend_dev.sh
 
-   # 前端（默认 8088）
-   cd dash-fastapi-frontend && python3 app.py --env=dev
+   # 前端 - 默认 8088, dev 下启用 Flask debug + Dash 热重载
+   # 在另一个终端运行
+   ./start_frontend_dev.sh
    ```
 
-   生产建议用 WSGI/ASGI 服务器托管：后端 `uvicorn app:app`、前端 `waitress-serve wsgi:app`。
+   浏览器访问 `http://127.0.0.1:8088`，登录账号 `admin / admin123`（**首次登录后必须修改**），
+   后端 OpenAPI 文档 `http://127.0.0.1:9099/docs`。
 
-默认管理端地址 `http://127.0.0.1:8088`，默认账号 `admin / admin123`（**首次登录后必须修改**），
-后端 OpenAPI 地址 `http://127.0.0.1:9099/docs`。
+### 启动入口对照表
+
+仓库根目录下有 4 个启动脚本，统一管理虚拟环境创建与依赖安装，再 `exec` 启动对应服务。
+前后端共享根目录的 `.venv`，**不要**为前后端分别建 venv（会导致 `dash / flask / werkzeug`
+等传递依赖漂移）。
+
+| 脚本 | 用途 | 进程模型 | 关键覆盖变量（默认值） |
+| --- | --- | --- | --- |
+| `start_backend_dev.sh` | 后端开发 | uvicorn 单进程 + 热重载 | `APP_ENV=dev`、`APP_HOST` (0.0.0.0)、`APP_PORT` (9099) |
+| `start_backend_prod.sh` | 后端生产 | uvicorn 多 worker（建议 = CPU 核数） | `APP_HOST` (0.0.0.0)、`APP_PORT` (9099)、`APP_WORKERS` (1)、`APP_ROOT_PATH` (/prod-api) |
+| `start_frontend_dev.sh` | 前端开发 | Flask dev server + Dash 热重载 | `APP_ENV=dev`、`APP_HOST` (0.0.0.0)、`APP_PORT` (8088) |
+| `start_frontend_prod.sh` | 前端生产 | waitress 单进程 + 4 线程 | `APP_ENV=prod`、`APP_HOST` (0.0.0.0)、`APP_PORT` (8088) |
+
+公共覆盖：
+
+| 变量 | 作用 |
+| --- | --- |
+| `REQUIREMENTS_FILE` | 切换数据库分支（默认 `requirements.txt` = MySQL 驱动；PostgreSQL 用 `requirements-pg.txt`） |
+
+示例：
+
+```bash
+# 后端开发 (MySQL, 默认)
+./start_backend_dev.sh
+
+# 后端开发 (PostgreSQL 分支)
+REQUIREMENTS_FILE=requirements-pg.txt ./start_backend_dev.sh
+
+# 后端生产（4 worker，反代前缀 /prod-api）
+APP_WORKERS=4 ./start_backend_prod.sh
+
+# 前端开发
+./start_frontend_dev.sh
+
+# 前端生产（自定义端口）
+APP_PORT=9000 ./start_frontend_prod.sh
+```
+
+### 虚拟环境管理
+
+四个脚本**共用根目录的 `.venv`**，第一次跑任意一个脚本时会：
+
+1. 用系统 `python3` (`>= 3.10`) 执行 `python3 -m venv .venv`；
+2. 比对 `.venv/.deps_installed` 标记文件与 `requirements.txt` 的 mtime，按需跑
+   `pip install -r requirements.txt`；
+3. 把 venv 内 python 的绝对路径 (`${VENV_DIR}/bin/python`) 作为 `exec` 目标，绕开
+   `source activate` 与 `exec` 之间的兼容陷阱。
+
+常用操作：
+
+```bash
+# 强制重装依赖 (修改了 requirements.txt 但 mtime 未变时手动触发)
+rm -f .venv/.deps_installed && ./start_backend_dev.sh
+
+# 查看已装版本
+.venv/bin/python -m pip list | grep -E "dash|fastapi|waitress"
+
+# 跑前后端的离线测试
+.venv/bin/python -m pytest dash-fastapi-backend/tests
+.venv/bin/python -m pytest dash-fastapi-frontend/tests
+
+# 完全重建 (慎用, 会丢所有已装的包)
+rm -rf .venv && ./start_backend_dev.sh
+```
+
+### 生产部署（推荐拓扑）
+
+生产环境不要直接对外暴露 9099 / 8088 端口，统一走 Nginx 终止 HTTPS，再反代到内网
+服务。`.env.prod` 默认 `APP_IS_PROXY=true`、`APP_PROXY_PATH=/prod-api`，前后端在 Nginx
+层按前缀分发。
+
+```text
+   ┌───────────────────────────────┐
+   │  浏览器 ─HTTPS→ Nginx :443   │
+   │      │                        │
+   │      │ location /          → 前端 :8088
+   │      │ location /prod-api/ → 后端 :9099/  (去前缀)
+   │      │ location /open/     → 后端 :9099/open/  (厂商回调, 不去前缀)
+   │      │ location /docs, /redoc, /openapi.json → 后端 :9099
+   └──────┬────────────────────────┘
+          │              │
+   :8088  │              │ :9099
+   ┌──────▼────────┐    ┌─▼──────────────────────┐
+   │  waitress    │    │  uvicorn (N workers)   │
+   │  wsgi.py     │    │  app:app               │
+   │  (Dash+Flask)│    │  (FastAPI)             │
+   └──────────────┘    └────────┬───────────────┘
+                                │
+                       ┌────────▼─────────┐
+                       │ MySQL / PG + Redis│
+                       └──────────────────┘
+```
+
+#### Nginx 站点配置示例
+
+```nginx
+upstream ml_backend {
+    server 127.0.0.1:9099;
+}
+
+upstream ml_frontend {
+    server 127.0.0.1:8088;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ml.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/ml.example.com.crt;
+    ssl_certificate_key /etc/nginx/ssl/ml.example.com.key;
+
+    # 厂商回调入口 (POST, 必须保留 /open 前缀)
+    location /open/ {
+        proxy_pass http://ml_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 5s;     # 厂商要求 3s 内响应, 留余量
+    }
+
+    # 后端 OpenAPI 文档
+    location /docs {
+        proxy_pass http://ml_backend;
+    }
+    location /redoc {
+        proxy_pass http://ml_backend;
+    }
+    location /openapi.json {
+        proxy_pass http://ml_backend;
+    }
+
+    # 后端业务接口 (前端通过 APP_PROXY_PATH=/prod-api 调用)
+    location /prod-api/ {
+        proxy_pass http://ml_backend;     # 末尾不带 /, 前端按 .env.prod 拼完整路径
+        # 若后端 APP_ROOT_PATH 与 nginx 前缀不一致, 用 rewrite 去掉前缀:
+        # rewrite ^/prod-api/(.*)$ /$1 break;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # 前端静态 + Dash WS
+    location / {
+        proxy_pass http://ml_frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+# HTTP -> HTTPS
+server {
+    listen 80;
+    server_name ml.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+> 前端通过 `/prod-api/*` 调用后端，但 `proxy_pass` 不带尾 `/` 时前缀会原样转发，
+> 后端 `APP_ROOT_PATH` 必须设为 `/prod-api` 才能在 OpenAPI 与日志里看到正确路径。
+> 若希望 URL 中去掉前缀，把 `proxy_pass http://ml_backend;` 改成 `proxy_pass http://ml_backend/;`
+> 并相应取消后端的 `APP_ROOT_PATH`。
+
+#### systemd unit 示例
+
+```ini
+# /etc/systemd/system/minglue-backend.service
+[Unit]
+Description=Minglue backend (FastAPI)
+After=network.target mysql.service redis.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/minglue-ai
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/minglue/backend.env
+ExecStart=/opt/minglue-ai/start_backend_prod.sh
+Restart=on-failure
+RestartSec=3
+User=ml
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/minglue-frontend.service
+[Unit]
+Description=Minglue frontend (Dash + waitress)
+After=network.target minglue-backend.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/minglue-ai
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/minglue/frontend.env
+ExecStart=/opt/minglue-ai/start_frontend_prod.sh
+Restart=on-failure
+RestartSec=3
+User=ml
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> 注意 `WorkingDirectory` 已改为仓库根目录，脚本会自己 cd 到对应模块目录。
+> `EnvironmentFile=` 用来覆盖 `APP_HOST` / `APP_PORT` / `APP_WORKERS` 等运行时变量，
+> 同时也是注入数据库口令等敏感值的标准做法（详见日志与运维一节）。
+
+启用：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now minglue-backend minglue-frontend
+sudo systemctl status minglue-backend minglue-frontend
+```
+
+#### 日志与运维
+
+- 服务把 loguru 输出到 stdout，由 journald 接管：
+  ```bash
+  journalctl -u minglue-backend -f
+  journalctl -u minglue-frontend -f
+  ```
+- 修改 `.env.prod` 后，平滑重启：`sudo systemctl restart minglue-backend minglue-frontend`。
+  uvicorn 多 worker 模型下，单进程重启不会导致会话断开；waitress 单进程会瞬断一次
+  WebSocket，准备好前端页面的自动重连即可（Dash 默认会自动重连）。
+- 升级数据库结构时，先执行 `dash-fastapi-backend/sql/migration/` 下的 SQL，再重启
+  后端；前端不需要重启。
+- `.env.prod` 中的数据库口令、厂商 AES 密钥、回调签名密钥等敏感项**必须**从密钥
+  管理系统注入 systemd 的 `Environment=` 或 `EnvironmentFile=`，不要写进仓库。
 
 > 若系统参数 `sys.account.captchaEnabled` 为 `true`（默认），登录需要图形验证码；
 > 自动化验收可临时把它置为 `false`：`redis-cli -n <db> set sys_config:sys.account.captchaEnabled false`。

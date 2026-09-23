@@ -1,29 +1,62 @@
-APScheduler==3.10.4
-asyncmy==0.2.9
-cachebox==4.2.3
-dash==2.18.2
-DateTime==5.5
+# 明略 AI 硬件数据管理平台 - 统一依赖清单
+#
+# 前后端共用同一个虚拟环境 (由根目录 start_*.sh 脚本管理), 因此本文件同时包含:
+#   - 后端 FastAPI 运行时 (uvicorn / SQLAlchemy / APScheduler / Redis / JWT ...)
+#   - 后端默认数据库驱动: MySQL (asyncmy + PyMySQL)
+#     PostgreSQL 用户请改用根目录的 requirements-pg.txt
+#   - 前端 Dash + feffery-antd-components
+#   - 共享工具 (loguru / pydantic-settings / cachebox / jsonpath-ng ...)
+#   - 测试依赖 (pytest)
+#
+# 注意事项:
+#   - dash 自动拉入 Flask 与 werkzeug, 这里未单独锁版本, 由 dash 决定
+#   - pydantic-settings / uvicorn 由 fastapi[all] 拉入, 不重复列出
+
+# ---------- 后端: Web 框架 ----------
 fastapi[all]==0.115.0
-cryptography==46.0.3
-feffery-antd-charts==0.1.0rc5
-feffery-antd-components==0.3.10
-feffery-markdown-components==0.2.10
-feffery-utils-components==0.2.0rc24
-Flask-Compress==1.15
-jsonpath-ng==1.5.3
+
+# ---------- 后端: 数据库 / 缓存 ----------
+SQLAlchemy[asyncio]==2.0.31
+asyncmy==0.2.9                       # MySQL 异步驱动 (PG 用 requirements-pg.txt)
+PyMySQL==1.1.1                       # MySQL 同步驱动 (APScheduler job store 用)
+redis==5.0.7
+APScheduler==3.10.4
+
+# ---------- 后端: HTTP / 鉴权 / 加密 ----------
 httpx==0.28.1
-loguru==0.7.2
-openpyxl==3.1.5
-pandas==2.2.2
+PyJWT[crypto]==2.8.0
+cryptography==46.0.3
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
+
+# ---------- 后端: 数据处理 / 文件 ----------
+pandas==2.2.2
+openpyxl==3.1.5
 Pillow==10.4.0
+
+# ---------- 后端: 工具 ----------
+loguru==0.7.2
 psutil==6.0.0
+DateTime==5.5
 pydantic-validation-decorator==0.1.4
-PyJWT[crypto]==2.8.0
-PyMySQL==1.1.1
-redis==5.0.7
-requests==2.32.3
-SQLAlchemy[asyncio]==2.0.31
-user-agents==2.2.0
+
+# ---------- 前端: Dash 框架 + UI 组件 ----------
+dash==2.18.2
+feffery-antd-components==0.3.10
+feffery-utils-components==0.2.0rc24
+feffery-antd-charts==0.1.0rc5
+feffery-markdown-components==0.2.10
+Flask-Compress==1.15
 waitress==3.0.1
+
+# ---------- 前端: 工具 ----------
+python-dotenv==1.0.1
+cachebox==4.2.3
+jsonpath-ng==1.5.3
+user-agents==2.2.0
+requests==2.32.3
+
+# ---------- 测试 ----------
+# 前端 tests/conftest.py 使用 dash / flask / cachebox / loguru / user_agents 的
+# 桩, 但 pytest 本身必须真实安装。
+pytest==8.3.3
