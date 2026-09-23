@@ -1,7 +1,7 @@
 # 明略 AIOT 接口契约盘点与现状差距分析
 
-- **文档版本**：v1.3
-- **文档更新时间**：2026-09-22
+- **文档版本**：v1.4
+- **文档更新时间**：2026-09-23
 - **对应 issue**：GYTAI-127（明略后台 1/6：接口规范盘点与现状差距分析）
 - **契约基线提交**：`agent/codex/gytai-123` 的 `3626af6` / `27ed2e8` / `18c2a91`
 - **事实来源**：父 issue GYTAI-123 指定的 Apifox 分享文档 + 仓库现有代码
@@ -17,6 +17,13 @@
 > 部分失败提示改用后端逐台 `results`/`partial`，指令结果查询直接消费
 > `{remote, remote_error, local}`，并新增"状态维护"走 `PUT /device/status`。
 > §5.6 前端矩阵与 §5.7 F8 已更新。
+
+> v1.4（Stage 3）说明：回调侧补齐最后 8 项悬空契约（B3/B13/B14/B15/B16/B17/B18/B19）
+> 与请求级测试（F4/F5）。回调路由移入独立模块
+> `module_device/controller/callback_controller.py`（**路径、方法与响应不变**），
+> 使厂商直连入口不再被 admin 侧运行期依赖牵住，请求级测试得以在轻量环境运行。
+> 同时按 §6-4 处理 AES 示例密钥：仓库测试一律改用非敏感合成向量并加静态扫描守卫。
+> 详见 §5.3、§8.2、§9.2。
 
 ---
 
@@ -79,11 +86,17 @@
 - 输出：**Base64**
 - 密钥：16 字节，由厂商提供
 
-文档给出的加密向量（用于自检，**示例密钥非本项目真实凭证，Stage 6 需确认其敏感级别**）：
+文档给出的加密向量：
 
 ```text
 encrypt('xxx', '<16字节示例密钥>') == 'R5V4MqWkJ4kD/zNcqaxPwQ=='
 ```
+
+> **该向量的 16 字节示例密钥不记入仓库**（Stage 3 / v1.4 处理，见 §6-4）。
+> 仓库自动化测试改用非敏感合成密钥 `test-only-key-01`，期望密文由
+> `openssl enc -aes-128-ecb -nosalt -base64` 独立复算，并有静态扫描守卫禁止
+> 示例密钥回流（`tests/test_minglue_stage3_callbacks.py`）。算法与向量可复算
+> 这一点不因换向量而改变：`encrypt('xxx', 'test-only-key-01') == 'JqR3ZGo6WmN/7nxhQXOKLg=='`。
 
 成功响应：
 
@@ -563,7 +576,7 @@ BODY: { "code": 0 }
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
 | A1 | `POST /thiea/site/accountLogin` 路径与方法 | `minglue_api_service.py:_get_token` 一致 | 已满足 | — |
-| A2 | 密码 AES-128-ECB + PKCS7 + Base64 | `encrypt_password` 一致；已用独立 openssl 复算文档向量 `R5V4MqWkJ4kD/zNcqaxPwQ==` 通过 | 已满足 | — |
+| A2 | 密码 AES-128-ECB + PKCS7 + Base64 | `encrypt_password` 一致；仓库测试改用非敏感合成密钥 `test-only-key-01`，期望密文由独立 `openssl enc` 复算（`JqR3ZGo6WmN/7nxhQXOKLg==`），文档示例密钥已移出仓库（§6-4） | 已满足 | — |
 | A3 | `isLock: true` | 固定传 `true` | 已满足 | — |
 | A4 | token 缓存与过期（`expires` 秒） | 进程内缓存 + 提前 60s 刷新；401/403 触发一次强制刷新重试；有请求级测试断言"命中缓存不重复登录"与"401 只重试一次" | 已满足（Stage 4 加固） | — |
 | A5 | 鉴权头形态（`Bearer ` 前缀与否） | 默认 `Bearer`，可用 `MINGLUE_API_AUTH_SCHEME` 置空；两种形态均有请求级测试 | **文档不明确**（已可配置验证） | P1 |
@@ -574,25 +587,36 @@ BODY: { "code": 0 }
 
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
-| B1 | POST + `application/json` 接收 | `POST /open/minglue/callback` 与 `/callback/{event_type}` | 已满足 | — |
-| B2 | 心跳成功响应 `{"code":0}` / 200 | 返回 `{'code': 0}` | 已满足 | — |
-| B3 | 心跳响应需 3s 内返回 | 同步落库后返回，未见超时保护；高频心跳下存在超时风险 | 部分满足 | P1 |
-| B4 | `rec` 类型识别与多设备遍历 | 由 `type` 识别，`content[]` 逐设备 upsert | 已满足 | — |
-| B5 | `op` / `sys` / `reclist` 类型识别 | 由 `type` 识别；`log_type`/`csn` 可正确取设备 | 已满足 | — |
+| B1 | POST + `application/json` 接收 | `POST /open/minglue/callback` 与 `/callback/{event_type}`（定义在 `module_device/controller/callback_controller.py`，`device_controller.py` 转出保持导入路径不变）；请求级测试逐类断言 200 与 `{"code":0}` | 已满足 | — |
+| B2 | 心跳成功响应 `{"code":0}` / 200 | 返回 `{'code': 0}`，有请求级断言 | 已满足 | — |
+| B3 | 心跳响应需 3s 内返回 | 同步落库包在 `asyncio.wait_for` 里，预算 `MINGLUE_CALLBACK_RESPONSE_BUDGET`（默认 2.5s，留 0.5s 写出余量，≤0 关闭）。超时后：回滚未提交的业务改动 → 用独立事务落 `process_status='timeout'` 审计记录（`payload_json` 完整，可重放）→ 返回可重试的 `503 {"code":1}`。请求级测试断言响应在预算内返回且超时记录含原文 | 已满足（Stage 3） | — |
+| B4 | `rec` 类型识别与多设备遍历 | 由 `type` 识别，`content[]` 逐设备 upsert；请求级测试用 3 设备单次回调断言各自落设备与录音记录 | 已满足 | — |
+| B5 | `op` / `sys` / `reclist` 类型识别 | 由 `type` 识别；`log_type`/`csn` 可正确取设备；三类各有请求级用例 | 已满足 | — |
 | B6 | `upload` 类型识别 | 已归一化：先看 `type`，无 `type` 时按 `objectKey`/`fileName`/`updatedAt` 判定为 `upload`，`logType` 单独落 `log_type` 列 | 已满足（Stage 2） | — |
-| B7 | `fc` 类型识别 | 由 `type` 识别；`sn`/`task_id` 可提取 | 已满足 | — |
-| B8 | `asr` 类型识别 | 由 `type` 识别；`sn`/`asrTskId` 可提取 | 已满足 | — |
+| B7 | `fc` 类型识别 | 由 `type` 识别。**Stage 3 修正**：此前只把 `files[]` 条目交给业务层，导致顶层 `task_id`/`status`/`group_key`/`timestamp` 全部丢失（`event_id` 退化为 NULL、转码状态/时间不入库）。现按 `_merged_item` 合成"顶层 + 列表条目"视图后再取业务键与时间，`task_id` 成为业务幂等键 | 已满足（Stage 3） | — |
+| B8 | `asr` 类型识别 | 由 `type` 识别；`sn`/`asrTskId` 可提取并落 `asr_task_id`；有请求级用例 | 已满足 | — |
 | B9 | 心跳（无 `type`）类型识别 | `_infer_event_type` 依据 `device_status`+`update_time` 判定 | 已满足 | — |
-| B10 | 原始报文完整留存 | `payload_json` 存整包 JSON（MySQL `longtext` / PG `text`） | 已满足 | — |
-| B11 | 幂等键确定性策略 | `dedup_key`（SHA-256，非空唯一）承担去重；有业务键用业务键，无业务键退化为报文规范化摘要；`rec` 每个 `object_key` 各自一条记录 | 已满足（Stage 2） | — |
-| B12 | 处理失败可追踪 | 业务改动回滚后用独立事务补 `failed` 审计记录，原始报文不丢失 | 已满足（Stage 2） | — |
-| B13 | 签名/鉴权 | 厂商**未定义**回调签名；现有可选 HMAC-SHA256 属本地加固 | 部分满足 | P1 |
-| B14 | 签名校验失败审计 | 校验失败直接 401，`signature_valid` 恒为 `'Y'`，无拒绝记录 | 部分满足 | P1 |
-| B15 | `session_id`（webhook id）留存 | 未单独落库 | 缺失 | P2 |
-| B16 | `topic_name` 留存 | 未单独落库 | 缺失 | P2 |
-| B17 | 其余 7 类回调成功响应体 | 文档只定义了心跳响应；其余统一返回 `{"code":0}` | 文档不明确 | P2 |
-| B18 | 事件时间口径一致 | `update_time`（字符串 `Y-m-d H:i:s`）按原样存为 naive datetime；`merge_success_time`/`timestamp`（Unix 秒）经 UTC 转换后去掉 tzinfo。两条路径口径不一致，若厂商字符串时间为北京时间将产生固定时差 | 部分满足 | P1 |
-| B19 | `rec` 的 `duration` 字段 | 未建模 | 缺失 | P2 |
+| B10 | 原始报文完整留存 | `payload_json` 存整包 JSON（MySQL `longtext` / PG `text`）；成功、重复、失败、拒绝、超时五类记录都带完整原文，请求级逐类断言 | 已满足 | — |
+| B11 | 幂等键确定性策略 | `dedup_key`（SHA-256，非空唯一）承担去重；有业务键用业务键，无业务键退化为报文规范化摘要；`rec` 每个 `object_key` 各自一条记录。请求级测试：同一心跳重推只落一条 `duplicate_flag='Y'` 记录且设备时间未被重写 | 已满足（Stage 2） | — |
+| B12 | 处理失败可追踪 | 业务改动回滚后用独立事务补 `failed` 审计记录，原始报文不丢失。请求级测试断言 500、无半条设备状态、`failed` 记录含原文与原因 | 已满足（Stage 2） | — |
+| B13 | 签名/鉴权 | 厂商**未定义**回调签名（§6-5）。`MINGLUE_CALLBACK_SECRET` 是本系统加固能力：**默认留空 = 完全不校验**（两个 `.env` 均留空，`.env.prod` 注释明确写"必须保持为空，否则真实回调全部 401"）。启用后接受 `X-Signature` / `X-Callback-Signature` = `hex(hmac_sha256(secret, 原始请求体))`，可带 `sha256=` 前缀。有请求级用例覆盖"默认关闭"与"开启后通过" | 已满足（Stage 3） | — |
+| B14 | 签名校验失败审计 | 校验失败返回 401 且**先落** `signature_valid='N'`、`process_status='rejected'` 的拒绝记录，不改动设备状态；请求级用例覆盖"缺头"与"错值"两种 | 已满足（Stage 3） | — |
+| B15 | `session_id`（webhook id）留存 | `ml_callback_log.session_id` 单独成列；`rec`/`asr` 另写入 `ml_recording_file.callback_session_id`。请求级断言可取到 61316/61317/61318/61319/888 | 已满足（Stage 2 已建模，Stage 3 补请求级证据并回写本表） | — |
+| B16 | `topic_name` 留存 | `ml_callback_log.topic_name` 单独成列；请求级断言 `hermes` 已落库 | 已满足（Stage 2 已建模，Stage 3 补请求级证据并回写本表） | — |
+| B17 | 其余 7 类回调成功响应体 | 文档只定义了心跳响应；其余统一返回 `{"code":0}`，**保持现状**（§5.9 U10）。请求级测试对 8 类逐一断言同一响应体，便于真实联调时观察厂商是否重推 | 文档不明确（已按现状固化并标注） | P2 |
+| B18 | 事件时间口径一致 | 落库口径统一为 **UTC naive**：Unix 秒按 UTC epoch 换算；带偏移的 ISO 串**按偏移换算**（此前直接丢弃 tzinfo 是错的）；不带偏移的墙钟串由 `MINGLUE_VENDOR_TIMEZONE` 声明归属，留空 = 原样保存（= 声明其为 UTC）。请求级测试用"同一时刻的 Unix 秒 / `+00:00` / `+08:00` 三种写法"断言落成同一值 | 已满足（Stage 3） | — |
+| B19 | `rec` 的 `duration` 字段 | `ml_recording_file.duration` 建模并逐条落库；非法值退化为 NULL。请求级断言多设备各自时长 | 已满足（Stage 2 已建模，Stage 3 补请求级证据并回写本表） | — |
+
+**B7 的实测复现（Stage 3）**：按 §2.6 样例喂入 `fc` 回调，修正前 `event_id` 为
+`None`、`transcode_task_id`/`transcode_status`/`transcode_file_path` 全空；修正后
+分别为 `1tsk3w11000ddqkwe4tsgok4mfifqify` / `completed` /
+`lt4/rec/20251021/.../..._stereo.mp3`，`event_time` = `2025-10-27 04:31:50`（UTC naive）。
+
+**B18 的实测复现（Stage 3）**：`1726210271`、`'2024-09-13 06:51:11+00:00'`、
+`'2024-09-13 14:51:11+08:00'` 三种写法落库值均为 `2024-09-13 06:51:11`；
+设 `MINGLUE_VENDOR_TIMEZONE=Asia/Shanghai` 后，墙钟串 `'2024-09-13 14:51:11'`
+同样落成 `2024-09-13 06:51:11`。Stage 1 记录的"字符串原样 naive / Unix 秒 UTC
+换算"两条口径不再并存。
 
 #### B6 / B11 的实测复现（本阶段已用桩模块验证）
 
@@ -676,11 +700,11 @@ BODY: { "code": 0 }
 
 | # | 契约项 | 现状 | 状态 | 优先级 |
 | --- | --- | --- | --- | --- |
-| F1 | AES 加密向量测试 | 有，且向量与文档一致（已独立复算）；Stage 4 追加"登录请求体里的密文等于文档向量且明文不出现在请求中"的请求级断言 | 已满足 | — |
-| F2 | 心跳回调字段映射测试 | 有（函数级，mock DAO） | 部分满足 | P1 |
-| F3 | `rec` 多设备与幂等键测试 | 有（函数级，mock DAO） | 部分满足 | P1 |
-| F4 | 请求级回调测试（覆盖 8 类） | **无**；仅覆盖 heartbeat / rec 两类，且均为函数级 smoke test | 缺失 | P1 |
-| F5 | 重复事件 / 缺失字段 / 非法字段 / 签名错误测试 | **无** | 缺失 | P1 |
+| F1 | AES 加密向量测试 | 有；仓库改用非敏感合成密钥，向量由独立 `openssl enc -aes-128-ecb` 复算。Stage 4 追加"登录请求体里的密文等于独立复算值且明文不出现在请求中"的请求级断言；Stage 3 另加静态扫描守卫，禁止文档示例密钥/密文回流到代码与配置 | 已满足（Stage 3 换向量） | — |
+| F2 | 心跳回调字段映射测试 | 有（函数级，mock DAO），并有请求级用例断言三态 `online`、字段映射与 `heartbeat_time` | 已满足 | — |
+| F3 | `rec` 多设备与幂等键测试 | 有（函数级，mock DAO），并有请求级用例断言 3 设备单次回调各自落设备/录音、业务幂等键非空且互不相同 | 已满足 | — |
+| F4 | 请求级回调测试（覆盖 8 类） | 有（Stage 3）：把回调路由挂到最小 FastAPI 应用，用 `httpx.ASGITransport` 发真实请求，8 类逐类断言路由/响应体/落库结果 | 已满足（Stage 3） | — |
+| F5 | 重复事件 / 缺失字段 / 非法字段 / 签名错误测试 | 有（Stage 3）：重复心跳幂等且不重写设备时间、缺 `sn` 仍留存、非法时间/非法 duration 退化为 NULL、`content` 非列表不崩、非法 JSON 422、签名缺失/错误 401 + 拒绝审计、业务失败 500 + 回滚 + `failed` 原文留存、落库超时 503 + `timeout` 原文留存 | 已满足（Stage 3） | — |
 | F6 | 厂商接口 mock 测试（token 刷新、错误映射、参数序列化） | 有（Stage 4）：`httpx.MockTransport` 起 mock 厂商服务，40 个请求级/服务级用例覆盖加密向量、token 缓存与刷新、重试边界、5 个接口的参数位置与包络解包、超时/401/400/404/业务错误/非法响应映射、敏感信息不外泄、本地台账更新与逐台部分失败 | 已满足（Stage 4） | — |
 | F7 | 数据库迁移 / 唯一约束 / 新旧库升级测试 | **无** | 缺失 | P1 |
 | F8 | 前端回调/组件测试 | 已补 66 条：页面纯逻辑、设备管理回调、回调日志回调、页面组件渲染与权限显隐、前后端权限与双库种子的静态一致性（`dash-fastapi-frontend/tests/`，不依赖 dash 运行时） | 已满足 | — |
@@ -712,9 +736,9 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 
 **P1（影响功能正确性与可验收性）**
 
-- B3 心跳 3s 响应时限保护
-- B13/B14 回调签名定位与失败审计
-- B18 事件时间口径不一致（字符串 naive 与 Unix UTC 混用）
+- ~~B3 心跳 3s 响应时限保护~~ → Stage 3 已关闭（落库预算 + 超时留痕 + 可重试 503）
+- ~~B13/B14 回调签名定位与失败审计~~ → Stage 3 已关闭（默认关闭 + 兼容策略写明；拒绝记录落 `signature_valid='N'`）
+- ~~B18 事件时间口径不一致~~ → Stage 3 已关闭（统一 UTC naive，偏移串按偏移换算，厂商时区可显式声明）
 - ~~C2 `sn` query 与 body `sns` 的并存语义~~ → Stage 4 已做成可配置开关，仅剩真实环境确认取值
 - ~~C4/D7 配置状态持久化~~ → Stage 4 已落库
 - ~~C8 厂商 `msg_id` 本地留存以支持回查~~ → Stage 4 已留存并串起回查
@@ -724,17 +748,20 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 - ~~E4/E5 前端缺失入口（配置同步 / 指令结果查询）~~ → Stage 5 已接入
 - ~~E6 心跳字段展示完整性~~ → Stage 5 已在详情弹窗逐字段展示
 - ~~E10 部分失败反馈~~ → Stage 4 返回逐台 `results`/`partial`，Stage 5 据此区分成功/部分失败/全部失败并分级提示
-- F4/F5 请求级回调测试；F7 迁移测试（Stage 2 已补，F4/F5 留给 Stage 3 补齐）
+- ~~F4/F5 请求级回调测试~~ → Stage 3 已补齐（30 条请求级用例）
+- F7 迁移测试（Stage 2 已补）
 - ~~F6 厂商接口 mock 测试~~ → Stage 4 已补齐
-- ~~F9 测试无法在干净环境被收集~~ → Stage 2 已修 ORM 侧；Stage 4 另修 `config/env.py` 在 import 期解析 `sys.argv` 导致带参数的 pytest 无法运行的问题
+- ~~F9 测试无法在干净环境被收集~~ → Stage 2 已修 ORM 侧；Stage 4 另修 `config/env.py` 在 import 期解析 `sys.argv` 导致带参数的 pytest 无法运行的问题；Stage 3 把回调入口与 admin 运行期依赖解耦，使请求级回调测试无需 loguru/apscheduler 即可运行
+- ~~D10 厂商示例 AES 密钥被写入测试向量~~ → Stage 3 已关闭（换合成向量 + 静态扫描守卫）
 
 **P2（体验与完备性）**
 
 - A7 业务错误码表
-- B15/B16 `session_id` / `topic_name` 留存
-- B17 其余回调响应体约定
+- ~~B15/B16 `session_id` / `topic_name` 留存~~ → Stage 2 已建模，Stage 3 补请求级证据并回写矩阵
+- ~~B19 `rec` 的 `duration` 建模~~ → Stage 2 已建模，Stage 3 补请求级证据并回写矩阵
+- B17 其余回调响应体约定（保持现状并在 §5.9 U10 标注，等真实联调观察）
 - E11 危险操作确认 —— **Stage 5 已关闭**（停止录音二次确认）
-- F8 前端测试 —— **Stage 5 已关闭**（`dash-fastapi-frontend/tests/`，66 条）
+- F8 前端测试 —— **Stage 5 已关闭**（`dash-fastapi-frontend/tests/`，77 条）
 
 ### 5.9 "文档不明确" 清单（不得靠猜字段名补齐）
 
@@ -749,8 +776,11 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | U7 | `fc.status` 取值域（示例 `completed`） | 原样存储 | 向厂商索取状态表 |
 | U8 | `asr.status` 取值域（示例 100） | 原样存储 | 向厂商索取状态表 |
 | U9 | `payload` / `response`（指令日志）结构 | 原样回传 | 向厂商索取 |
-| U10 | 除心跳外 7 类回调的成功响应体 | 统一返回 `{"code":0}` | 真实联调观察厂商是否重推 |
+| U10 | 除心跳外 7 类回调的成功响应体 | 统一返回 `{"code":0}`（Stage 3 已把该现状固化为 8 类逐一断言，便于联调对比） | 真实联调观察厂商是否重推 |
 | U11 | 业务错误码 `code` 非 0 的取值表 | 仅透传 `message` | 向厂商索取 |
+| U12 | `update_time` 等墙钟字符串的时区归属（北京时间？UTC？） | 落库口径统一为 UTC naive；墙钟串按 `MINGLUE_VENDOR_TIMEZONE` 换算，留空 = 原样保存。取一次真实心跳，与设备本地时间/`curl` 打点比对 | 真实设备核对；确认后只需改配置 |
+| U13 | `_eof` 结束分片标记相对扩展名的位置 | §2.1 模板写 `..._[文件序列号]_eof.[后缀]`（在扩展名之前），Stage 2 观测到的样例是 `..._10.opus_eof`（在之后）。现两种都识别为结束分片，避免漏判；若厂商确认只有一种，可收紧 | 取一份真实分片文件名核对 |
+| U14 | 非 2xx / 超时响应下厂商的重推策略 | 签名失败返回 401、落库超时返回 503 并留痕，均可重试；成功与重复一律 200 | 真实联调观察重推行为 |
 
 ---
 
@@ -758,9 +788,9 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 
 1. **鉴权头形态**（U1）：`Authorization: <token>` 还是 `Authorization: Bearer <token>`。
 2. **批量接口参数位置**（U2）：`sn` 是否真的作为 query 必填，还是文档冗余；body `sns` 是否足够。
-3. **回调接收地址与响应约定**（U10）：除心跳外 7 类回调，厂商对非 2xx / 非 `{"code":0}` 的重推策略未知。
-4. **厂商示例 AES 密钥的敏感级别**：Apifox 文档示例中出现 16 字节密钥，当前仓库测试向量引用了同一值。需确认它是公开示例还是真实凭证；若是真实凭证，Stage 6 必须移除并改用非敏感测试向量。
-5. **回调签名**：厂商文档未定义签名机制。现有可选 HMAC-SHA256 只能作为本系统加固能力，需在 Stage 3 明确"默认关闭 + 开启后的兼容策略"，不得对外声称是厂商标准。
+3. **回调接收地址与响应约定**（U10/U14）：除心跳外 7 类回调，厂商对非 2xx / 非 `{"code":0}` 的重推策略未知。本系统只在"签名校验失败（401）"与"落库超时（503）"两种情况下返回非 2xx，且两种都先留审计痕迹；若厂商不重推，按 `ml_callback_log.payload_json` 重放即可。
+4. ~~**厂商示例 AES 密钥的敏感级别**：Apifox 文档示例中出现 16 字节密钥，当前仓库测试向量引用了同一值。~~ → **Stage 3 已按"可能是真实凭证"处理**：仓库不再记录该密钥，测试统一改用非敏感合成密钥 `test-only-key-01` 并独立复算向量，另加静态扫描守卫（`test_repository_carries_no_vendor_example_aes_key` / `test_vendor_example_ciphertext_stays_out_of_code_and_config`）。文档 §1.1 只保留掩码说明。**仍需向厂商确认该示例密钥的真实敏感级别**：若确认是公开示例，可回填为一个显式的文档常量（但无必要）。
+5. **回调签名**：厂商文档未定义签名机制。现有可选 HMAC-SHA256 只能作为本系统加固能力，Stage 3 已明确"默认关闭 + 开启后的兼容策略"（见 §5.3 B13），未对外声称是厂商标准。**注意 `.env.prod` 必须保持 `MINGLUE_CALLBACK_SECRET` 为空**，否则厂商未签名会让全部真实回调 401；只有在接入网关对原始请求体签名后才可开启。
 6. **心跳频率与落库压力**：每台设备约 3 分钟一次心跳，当前每跳一条回调日志且无幂等；需按真实设备规模评估是否需要心跳降采样或独立表。
 7. **日志文件下载与解析**：`sys`/`op`/`reclist` 的结构化字段在 `object_key` 指向的日志文件里，`download_url` 有有效期。是否需要下载解析、以及对象存储访问方式，需与厂商确认。
 8. **厂商测试环境与设备**：所有控制类接口（开启/停止录音）**不得**对生产设备发起；真实联调必须使用用户明确授权的测试环境与测试设备。
@@ -772,16 +802,16 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | 阶段 | 本阶段给出的输入 |
 | --- | --- |
 | Stage 2（数据模型/DAO/迁移） | §2、§3 的完整字段字典；§5.5 的 D1–D10 差距；P0 的 B11/D5 幂等键策略、D6 业务模型、D7 配置字段 |
-| Stage 3（回调精确适配） | §2 的 8 类回调契约；P0 的 B6/B11/B12；U3–U10 待确认项；B13/B14 签名定位 |
+| Stage 3（回调精确适配） | §2 的 8 类回调契约；P0 的 B6/B11/B12；U3–U10 待确认项；B13/B14 签名定位。**Stage 3 交付**：B3/B7/B13/B14/B18 关闭、B15/B16/B19 回写、D10 收口、F4/F5 关闭、§8.2 与 §9.2 |
 | Stage 4（设备控制对接） | §4 的 5 个接口契约；C2/C4/C8/C9 差距；U1/U2/U9/U11 待确认项。**Stage 4 交付**：§4.6 一致性规则、§4.7 本地接口清单、C2/C4/C8/C9/C10/C11 关闭、F6 关闭 |
 | Stage 5（前端页面） | E1–E11 差距；§3 心跳字段字典用于详情展示；**新增输入**：§4.7 的本地接口清单（含 `PUT /device/status`、指令结果查询的 `{remote, remote_error, local}` 结构、批量同步的 `partial`/`results` 逐台结果，用于部分失败提示） |
-| Stage 6（全链路验收） | §5.8 的 P0/P1/P2 汇总作为验收清单；§6 全部真实环境事项；**Stage 4 追加**：`config/env.py` 在 pytest 下的 argv 处理、`exceptions/exception.py` 的 message 传递、U1/U2 两种开关取值的真实环境验证 |
+| Stage 6（全链路验收） | §5.8 的 P0/P1/P2 汇总作为验收清单；§6 全部真实环境事项；**Stage 4 追加**：`config/env.py` 在 pytest 下的 argv 处理、`exceptions/exception.py` 的 message 传递、U1/U2 两种开关取值的真实环境验证；**Stage 3 追加**：§5.9 的 U10/U12/U13/U14、`MINGLUE_CALLBACK_RESPONSE_BUDGET` 与 `MINGLUE_VENDOR_TIMEZONE` 两个新开关的真实取值、以及 §8.2 的 34 条请求级用例作为回归基线 |
 
 ### 7.1 本阶段结论
 
 - 首版实现（`agent/codex/gytai-123`）已在框架、设备台账、回调接收、控制接口、页面与权限上形成可用骨架，**未偏离 Dash-FastAPI-Admin 的目录与权限体系**。
 - 与厂商契约的**结构性偏差集中在回调侧**：类型归一化、幂等键、失败留存三项为 P0，必须在 Stage 2/3 定稿。
-- 厂商文档自身存在多处矛盾与留白（U1–U11），后续阶段**不得凭字段名猜测**，应按 §5.9 逐项确认并回写本文档。
+- 厂商文档自身存在多处矛盾与留白（U1–U14），后续阶段**不得凭字段名猜测**，应按 §5.9 逐项确认并回写本文档。
 - 本阶段**未做大规模业务代码改造**，仅纳入既有实现、补齐契约与差距文档。
 
 ---
@@ -796,7 +826,7 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | Python 语法编译 | `python3 -m compileall -q module_device/ tests/` | ✅ 通过 |
 | 空白/冲突标记 | `git diff --check` | ✅ 通过 |
 | MySQL 与 PG 表结构等价 | 逐表比对 `ml_device` / `ml_callback_log` 列集合 | ✅ 两表列数一致（34/34、11/11），无单侧列 |
-| AES 加密向量 | 用 `openssl enc -aes-128-ecb` 独立复算文档向量 | ✅ 得到 `R5V4MqWkJ4kD/zNcqaxPwQ==`，与测试断言一致 |
+| AES 加密向量 | 用 `openssl enc -aes-128-ecb` 独立复算文档向量 | ✅ 得到 `R5V4MqWkJ4kD/zNcqaxPwQ==`（**Stage 1 记录**；v1.4 已把示例密钥移出仓库、测试改用合成向量，见 §8.2） |
 | 回调类型/幂等键映射 | 桩模块加载 `CallbackService`，按 8 类文档样例逐项喂入 | ⚠️ 复现 B6（`upload` 误判）与 B11（心跳 `event_id=None`、`rec` 只取首条），见 §5.3 |
 | 时间解析口径 | 同上，实测字符串与 Unix 秒两条路径 | ⚠️ 复现 B18 口径不一致 |
 | 现有测试套件 | `pytest tests/` | ❌ 无法收集：缺少 `asyncmy`，`config/database.py` import 期建引擎（F9） |
@@ -817,7 +847,7 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 | Python 语法编译 | `compileall -q module_device/ tests/ config/ exceptions/` | ✅ 通过 |
 | 空白/冲突标记 | `git diff --check` | ✅ 通过 |
 | mock 厂商覆盖 | `httpx.MockTransport` 起 mock 服务，按 5 个设备接口断言请求 | ✅ 路径/方法/query/body/鉴权头逐项断言 |
-| 加密向量 | 登录请求体断言 `password == R5V4MqWkJ4kD/zNcqaxPwQ==` 且明文不出现 | ✅ 通过 |
+| 加密向量 | 登录请求体断言密文等于独立复算值且明文不出现 | ✅ 通过（v1.4 起改用合成密钥 `test-only-key-01`，见 §8.2） |
 | token 生命周期 | 缓存命中不重复登录、401 强制刷新只重试一次、连续 401 的报错不含凭据 | ✅ 通过 |
 | 错误映射 | 超时 / 连接失败 / 400 / 404 / `code!=0` / 非 JSON / 非对象 / 缺 `entities` / 缺 `msg_id` | ✅ 均有确定行为与可读错误 |
 | 敏感信息 | 错误信息脱敏断言 + 控制日志不含 token | ✅ 通过 |
@@ -829,11 +859,38 @@ E   ModuleNotFoundError: No module named 'asyncmy'
 - 本阶段环境未安装运行期依赖 `loguru` 等，未做应用启动级 smoke test；`config/get_db.py` 因此无法在测试中导入，指令回查逻辑下沉到服务层以便测试（见 §4.7）。
 - `exceptions/exception.py` 的 6 个自定义异常原先不向基类传递 `message`，`str(exc)` 恒为空串，导致审计字段 `error_message` 会丢失原因；本阶段修正为 `super().__init__(message)`。
 
+### 8.2 Stage 3 验证结果（GYTAI-125，v1.4）
+
+分支 `agent/codebuddy/gytai-125`，基线为 `a1f86ec`（S1→S2→S4→S5 线性链尾）。
+
+| 检查项 | 命令 | 结果 |
+| --- | --- | --- |
+| 后端测试套件 | `pytest`（`dash-fastapi-backend`） | ✅ **120 passed**（此前 86 + 本阶段 34） |
+| 请求级回调测试 | `pytest -q tests/test_minglue_stage3_callbacks.py` | ✅ **34 passed**：8 类逐类、多设备、重复幂等、缺字段/非法字段、非法 JSON、签名缺失/错误/通过、业务失败回滚、落库超时降级、时间口径、路由不变量、凭证扫描 |
+| 前端测试套件 | `pytest`（`dash-fastapi-frontend`） | ✅ **77 passed**（回调路由未改动前端消费的接口） |
+| 后端 lint | `ruff check module_device/ tests/` | ✅ `All checks passed!` |
+| Python 语法编译 | `compileall -q module_device/ tests/ config/ exceptions/` | ✅ 通过 |
+| 空白/冲突标记 | `git diff --check` | ✅ 通过 |
+| 路由不变 | 断言 `callbackController` 前缀与路由集合恰为 `POST /open/minglue/callback` 与 `POST /open/minglue/callback/{event_type}` | ✅ 与 §2 契约逐项一致 |
+| 响应时限 | 人为把落库拖到 1s、预算设 0.05s | ✅ 响应在预算内返回，落 `timeout` 审计记录且 `payload_json` 完整 |
+| 事务边界 | 业务落库抛错 | ✅ 500；无半条设备状态/录音记录；`failed` 记录含原文与原因 |
+| 时间口径 | 同一时刻的 Unix 秒 / `+00:00` / `+08:00` 三种写法 | ✅ 均落 `2024-09-13 06:51:11`（UTC naive） |
+| 厂商示例凭证 | 全仓扫描文档示例 AES 密钥与密文 | ✅ 密钥 0 命中；密文只出现在文档说明里 |
+| 对外请求 | 全阶段未向真实设备/厂商发起任何请求 | ✅ mock 仅在内存 SQLite + ASGI 传输层 |
+
+补充说明：
+
+- 本阶段环境同样未安装 `loguru`/`apscheduler`（与 Stage 4 相同）。回调入口因此拆到
+  `module_device/controller/callback_controller.py`，只依赖 fastapi 与服务层，
+  数据库会话用**延迟导入**取得；请求级测试用 `dependency_overrides` 注入内存 SQLite。
+  这不是测试专用后门：延迟导入在运行时走的就是 `config/get_db.get_db`。
+- 本阶段**未做前端改动**；`dash-fastapi-frontend` 的测试为回归确认。
+
 ---
 
 ## 9. 阶段交接的遗留说明
 
-### 9.1 Stage 3 未交付
+### 9.1 Stage 3 未交付（历史记录，Stage 3 重跑后已闭合）
 
 本阶段开始时，Stage 3（GYTAI-125：厂商回调接口精确适配）**没有任何交付物**：
 issue 状态为 `in_progress`，无结果评论，仓库中不存在 `agent/codebuddy/gytai-125`
@@ -852,6 +909,26 @@ issue 状态为 `in_progress`，无结果评论，仓库中不存在 `agent/code
   `.env.dev`/`.env.prod` 的两个开关、`tests/` 与本文档），合并冲突风险低；
   Stage 5/6 需确认两者都在同一分支上。
 
+### 9.2 Stage 3 重跑的落点与范围（v1.4）
+
+Stage 3 于 2026-09-23 重跑。此时 Stage 4（`79ab4bf`）与 Stage 5（`a1f86ec`）已先行
+落地：回调路由、原始报文留存、幂等键、失败审计都随 Stage 2/4 实现完毕。
+
+因此**没有从 `dcf8486` 重新实现回调接口**（那会重复改动
+`module_device/controller/device_controller.py` 并在合并时制造第三轮冲突），而是：
+
+- 以 `a1f86ec`（S1→S2→S4→S5 链尾）为基线建 `agent/codebuddy/gytai-125`，满足
+  §9.1 末条"Stage 5/6 需确认两者都在同一分支上"的要求；
+- 只在回调侧收口真正悬空的契约项与请求级测试，改动范围落在一个新模块 +
+  `device_service.py` 的回调/时间/超时部分 + 两个 `.env` 的回调开关 + `tests/` + 本文档。
+
+回调路由**未改变对外契约**：前缀、路径、方法、Content-Type、成功响应体与
+Stage 1 契约逐项一致，前端消费的 `/device/callback/*` 管理端接口也未改动。
+
+**本阶段仍悬空、留给 Stage 6 的事项**：§5.9 的 U10（其余 7 类响应体的厂商重推策略）、
+U12（厂商墙钟时区）、U13（`_eof` 标记位置）、U14（非 2xx 重推策略），以及
+§6 的全部真实环境事项——这些都需要真实设备或厂商答复，不能靠代码推断。
+
 ---
 
 ## 附：文档维护约定
@@ -866,3 +943,4 @@ issue 状态为 `in_progress`，无结果评论，仓库中不存在 `agent/code
 | v1.1 | 2026-09-22 | CodeBuddy（Stage 2） | 数据模型/DAO/迁移定稿：关闭 B6/B11/B12、D2/D3/D5/D6/D7、F9；新增 `ml_recording_file`、`ml_device_control_log`；新增可重复执行的双库迁移脚本；补 45 个模型/DAO/迁移测试 |
 | v1.2 | 2026-09-22 | CodeBuddy（Stage 4） | 厂商控制接口精确对接：关闭 C2/C4/C8/C9/C10/C11 与 F6；新增 §4.6 远端同步/本地台账一致性规则、§4.7 本地设备管理接口清单；补 40 个 mock 厂商请求级/服务级测试 |
 | v1.3 | 2026-09-22 | CodeBuddy（Stage 5） | 前端页面与权限定稿：关闭 E1–E12、F8；设备页补齐详情/状态维护/配置同步/录音确认/指令结果，回调页补齐四类筛选与脱敏报文，部分失败提示改用后端逐台 `results`；前端权限判断与后端守卫、双库种子静态对齐；补 66 条前端测试 |
+| v1.4 | 2026-09-23 | CodeBuddy（Stage 3 重跑） | 回调侧收口：关闭 B3（3s 预算 + 超时留痕 + 可重试 503）、B13/B14（签名默认关闭 + 兼容策略 + 拒绝审计）、B18（时间口径统一 UTC naive）、B15/B16/B19（补请求级证据并回写矩阵）、B7（`fc` 顶层字段丢失修正）、D10（示例密钥移出仓库 + 扫描守卫）与 F4/F5（34 条请求级用例）；回调路由拆入 `callback_controller.py`（对外契约不变）；新增 U12/U13/U14 不确定项；补 §8.2、§9.2 |

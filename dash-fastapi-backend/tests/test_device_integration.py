@@ -20,7 +20,18 @@ from module_device.service.minglue_api_service import MinglueApiService
 
 
 def test_encrypt_password_matches_aes_128_ecb_pkcs7_vector():
-    assert MinglueApiService.encrypt_password('xxx', '10c0a163653b0071') == 'R5V4MqWkJ4kD/zNcqaxPwQ=='
+    """A2：AES-128-ECB + PKCS7 + Base64。
+
+    这里改用**非敏感的合成测试密钥**，不记录 Apifox 文档示例里的那个 16 字节
+    密钥（契约 §6-4 / D10：无法确认它是否为真实厂商凭证，因此不留在仓库里）。
+    期望密文由独立实现复算得到，不取自被测代码：
+
+    ```text
+    printf '%s' 'xxx' | openssl enc -aes-128-ecb -K 746573742d6f6e6c792d6b65792d3031 -nosalt -base64
+    → JqR3ZGo6WmN/7nxhQXOKLg==
+    ```
+    """
+    assert MinglueApiService.encrypt_password('xxx', 'test-only-key-01') == 'JqR3ZGo6WmN/7nxhQXOKLg=='
 
 
 @pytest.mark.asyncio

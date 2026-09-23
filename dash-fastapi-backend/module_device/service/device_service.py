@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -260,6 +262,35 @@ class DeviceService:
         return len(stale)
 
 
+_VENDOR_TZ_CACHE: Dict[str, Any] = {}
+
+
+def _vendor_timezone():
+    """厂商墙钟字符串（`Y-m-d H:i:s`）所在时区；未配置时按原样保存（契约 B18）。
+
+    厂商文档未说明 `update_time` 的时区（§5.9 U12）。为让两条时间路径口径一致，
+    这里把口径收敛为"落库一律 UTC naive"：
+
+    - Unix 秒：本身即 UTC epoch，直接换算成 UTC naive（无歧义）。
+    - 带偏移的 ISO 串（`+08:00` / `Z`）：按偏移换算成 UTC naive（修正原先直接
+      丢弃 tzinfo 导致的口径错误）。
+    - 不带偏移的墙钟串：由 `MINGLUE_VENDOR_TIMEZONE` 显式声明归属；留空表示
+      "按原样保存"，等价于声明它就是存储时区（UTC）。
+
+    若真实设备确认是北京时间，把该变量设为 `Asia/Shanghai` 即可，无需改代码。
+    """
+    name = os.getenv('MINGLUE_VENDOR_TIMEZONE', '').strip()
+    if not name:
+        return None
+    if name not in _VENDOR_TZ_CACHE:
+        try:
+            _VENDOR_TZ_CACHE[name] = ZoneInfo(name)
+        except Exception:
+            # 配置写错时降级为"不做换算"，避免每条回调都因配置问题失败。
+            _VENDOR_TZ_CACHE[name] = None
+    return _VENDOR_TZ_CACHE[name]
+
+
 class CallbackService:
     DEVICE_CODE_KEYS = ('device_code', 'deviceCode', 'device_id', 'deviceId', 'deviceSn', 'sn', 'imei')
     EVENT_ID_KEYS = (
@@ -311,17 +342,39 @@ class CallbackService:
 
     @classmethod
     def _parse_datetime(cls, value: Any) -> Optional[datetime]:
+        """把厂商时间字段统一成 **UTC naive**（契约 B18）。
+
+        两条口径（`update_time` 字符串 / `merge_success_time`、`timestamp` Unix 秒）
+        此前一条按原样墙钟、一条按 UTC 换算，混用会产生固定时差。现在统一为：
+
+        - 数值：Unix 秒（毫秒自动识别）→ UTC naive；
+        - 字符串带偏移：按偏移换算 → UTC naive；
+        - 字符串不带偏移：按 `MINGLUE_VENDOR_TIMEZONE` 换算（默认留空 = 原样）。
+        """
         if value in (None, ''):
             return None
         if isinstance(value, datetime):
-            return value
+            return cls._to_utc_naive(value)
         if isinstance(value, (int, float)):
             timestamp = value / 1000 if value > 10_000_000_000 else value
             return datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
         try:
-            return datetime.fromisoformat(str(value).replace('Z', '+00:00')).replace(tzinfo=None)
+            parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
         except ValueError:
             return None
+        if parsed.tzinfo is not None:
+            return cls._to_utc_naive(parsed)
+        vendor_tz = _vendor_timezone()
+        if vendor_tz is not None:
+            parsed = parsed.replace(tzinfo=vendor_tz)
+            return cls._to_utc_naive(parsed)
+        return parsed
+
+    @staticmethod
+    def _to_utc_naive(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
 
     @classmethod
     def _normalize_event_type(cls, payload: Dict[str, Any], path_event_type: Optional[str]) -> str:
@@ -351,6 +404,17 @@ class CallbackService:
             if isinstance(value, list):
                 items.extend(item for item in value if isinstance(item, dict))
         return items or [payload]
+
+    @classmethod
+    def _merged_item(cls, payload: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+        """把顶层字段与列表条目合成一个视图（条目字段优先）。
+
+        `fc` 的设备号/`task_id`/`status`/`timestamp` 在**顶层**，文件路径在
+        `files[]`；`rec` 的 `session_id` 在顶层、`object_key` 在 `content[]`。
+        只取其中一层会丢业务键与事件时间，因此统一在这里合并；列表本身保留在
+        视图里，供 `_persist_transcode` 再取 `files[].file_path`。
+        """
+        return {**payload, **item}
 
     @classmethod
     def _item_device_code(cls, item: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
@@ -425,10 +489,14 @@ class CallbackService:
 
         first_device_code = None
         for index, item in enumerate(items):
-            device_code = cls._item_device_code(item, fallback_code)
+            # 顶层字段（fc 的 task_id/status/group_key/timestamp、rec 的 session_id 等）
+            # 与列表条目（rec.content[] 的 object_key、fc.files[] 的 file_path）分居两层，
+            # 这里先合成一个视图再取设备/业务键/时间，避免只看到其中一层。
+            merged_item = cls._merged_item(payload, item)
+            device_code = cls._item_device_code(merged_item, fallback_code)
             first_device_code = first_device_code or device_code
-            event_id = cls._build_event_id(event_type, item)
-            dedup_key = cls._build_dedup_key(event_type, event_id, item)
+            event_id = cls._build_event_id(event_type, merged_item)
+            dedup_key = cls._build_dedup_key(event_type, event_id, merged_item)
             try:
                 existing = await CallbackDao.get_by_dedup_key(db, dedup_key)
                 if existing:
@@ -441,7 +509,7 @@ class CallbackService:
                             'event_id': event_id,
                             'dedup_key': f'{dedup_key[:110]}:dup:{received_at.timestamp():.6f}:{index}',
                             'device_code': device_code,
-                            'event_time': cls._item_event_time(item, event_type),
+                            'event_time': cls._item_event_time(merged_item, event_type),
                             'process_status': 'duplicate',
                             'duplicate_flag': 'Y',
                             'processed_at': datetime.now(),
@@ -458,14 +526,14 @@ class CallbackService:
                         'event_id': event_id,
                         'dedup_key': dedup_key,
                         'device_code': device_code,
-                        'event_time': cls._item_event_time(item, event_type),
+                        'event_time': cls._item_event_time(merged_item, event_type),
                         'process_status': 'success',
                         'duplicate_flag': 'N',
                     },
                 )
                 if device_code:
-                    await cls._apply_item(db, event_type, device_code, item, payload, item_index=index)
-                    await cls._persist_business_item(db, event_type, device_code, item, session_id)
+                    await cls._apply_item(db, event_type, device_code, merged_item, item_index=index)
+                    await cls._persist_business_item(db, event_type, device_code, merged_item, session_id)
                 callback.process_status = 'success'
                 callback.processed_at = datetime.now()
                 await db.commit()
@@ -480,7 +548,7 @@ class CallbackService:
                     event_id=event_id,
                     dedup_key=dedup_key,
                     device_code=device_code,
-                    item=item,
+                    item=merged_item,
                     event_type=event_type,
                     received_at=received_at,
                     index=index,
@@ -552,14 +620,14 @@ class CallbackService:
         event_type: str,
         device_code: str,
         item: Dict[str, Any],
-        payload: Dict[str, Any],
         item_index: int = 0,
     ):
-        """按条目更新设备状态；每条目独立入参，`rec` 多设备不再只取首条。"""
-        merged = {key: value for key, value in payload.items() if key not in cls.ITEM_KEYS}
-        merged.update(item)
+        """按条目更新设备状态；每条目独立入参，`rec` 多设备不再只取首条。
+
+        `item` 应是 `_merged_item` 合成后的视图（顶层 + 列表条目）。
+        """
         event_time = cls._item_event_time(item, event_type)
-        await cls._upsert_device(db, device_code, event_type, merged, event_time)
+        await cls._upsert_device(db, device_code, event_type, item, event_time)
 
     @classmethod
     async def _persist_business_item(
@@ -582,13 +650,18 @@ class CallbackService:
     def _is_eof_object_key(cls, object_key: Optional[str]) -> str:
         """按契约 §2.1 的文件名规则判断结束分片。
 
-        结束分片的文件名以 `_eof` 结尾（`..._10.opus_eof`），该标记位于扩展名
-        **之后**，所以对整个 basename 做后缀判断，不能只比较最后一段。
+        §2.1 的模板把标记写成 `..._[文件序列号]_eof.[后缀]`（`_eof` 在扩展名
+        **之前**），而实现侧观测到的样例是 `..._10.opus_eof`（在扩展名**之后**）。
+        两处证据指向的位置不同，这里两种都认：basename 以 `_eof` 结尾，或去掉
+        扩展名后的主干以 `_eof` 结尾。歧义本身记在契约文档的不确定项里。
         """
         if not object_key:
             return 'N'
-        name = str(object_key).rsplit('/', 1)[-1]
-        return 'Y' if name.lower().endswith('_eof') else 'N'
+        name = str(object_key).rsplit('/', 1)[-1].lower()
+        if name.endswith('_eof'):
+            return 'Y'
+        stem = name.rsplit('.', 1)[0] if '.' in name else name
+        return 'Y' if stem.endswith('_eof') else 'N'
 
     @classmethod
     async def _persist_recording(
@@ -890,6 +963,53 @@ class CallbackService:
                     'processed_at': datetime.now(),
                     'payload_json': json.dumps(payload, ensure_ascii=False, default=str),
                     'error_message': '回调签名校验失败',
+                    'request_ip': request_ip,
+                },
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
+    @classmethod
+    async def record_timeout(
+        cls,
+        db: AsyncSession,
+        payload: Dict[str, Any],
+        path_event_type: Optional[str],
+        request_ip: Optional[str],
+        elapsed: float,
+    ):
+        """B3：同步落库超时后的降级留痕。
+
+        厂商明确"回调地址响应超过 3s 即视为失败"，所以调用方必须在预算内把响应
+        交出去。未被处理完的报文以 `process_status='timeout'` 独立落库，
+        `payload_json` 完整保留，可按该记录重放；`error_message` 写明耗时，
+        使降级原因可解释。
+        """
+        event_type = cls._normalize_event_type(payload, path_event_type)
+        received_at = datetime.now()
+        digest = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
+        ).hexdigest()
+        try:
+            await CallbackDao.add(
+                db,
+                {
+                    'event_type': event_type,
+                    'log_type': str(payload.get('logType'))[:100] if payload.get('logType') else None,
+                    'dedup_key': hashlib.sha256(
+                        f'timeout|{digest}|{received_at.timestamp():.6f}'.encode('utf-8')
+                    ).hexdigest(),
+                    'session_id': cls._as_int(payload.get('session_id')),
+                    'topic_name': str(payload.get('topic_name'))[:64] if payload.get('topic_name') else None,
+                    'item_count': len(cls._items(payload)),
+                    'received_at': received_at,
+                    'signature_valid': 'Y',
+                    'process_status': 'timeout',
+                    'duplicate_flag': 'N',
+                    'processed_at': datetime.now(),
+                    'payload_json': json.dumps(payload, ensure_ascii=False, default=str),
+                    'error_message': f'同步落库超过回调预算（{elapsed:.3f}s），原始报文已留存，可据此重放',
                     'request_ip': request_ip,
                 },
             )

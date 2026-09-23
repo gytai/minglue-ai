@@ -29,7 +29,12 @@ from module_device.service.minglue_api_service import MinglueApiService
 BASE_URL = 'https://aiot.mock'
 VENDOR_USERNAME = 'svc-minglue'
 VENDOR_PASSWORD = 'VendorPwd-2026'
-VENDOR_AES_KEY = '10c0a163653b0071'
+#: 非敏感的合成测试密钥。Apifox 文档示例里那个 16 字节密钥按契约 §6-4 / D10
+#: 不记入仓库（无法确认它是否为真实厂商凭证）。
+VENDOR_AES_KEY = 'test-only-key-01'
+#: 由独立实现复算得到的期望密文，不取自被测代码：
+#: printf '%s' 'VendorPwd-2026' | openssl enc -aes-128-ecb -K 746573742d6f6e6c792d6b65792d3031 -nosalt -base64
+VENDOR_PASSWORD_CIPHERTEXT = '9TYbugkT7yTY7vJlVH61fg=='
 TOKEN_ONE = 'ACCESS-TOKEN-0001'
 TOKEN_TWO = 'ACCESS-TOKEN-0002'
 
@@ -127,10 +132,14 @@ def body_of(request: httpx.Request) -> Dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_login_body_carries_documented_aes_vector_and_never_the_plaintext(vendor, monkeypatch):
-    """契约 §1.1：密码必须是 AES-128-ECB+PKCS7+Base64，且明文不出现在请求里。"""
-    monkeypatch.setenv('MINGLUE_API_PASSWORD', 'xxx')
-    monkeypatch.setenv('MINGLUE_API_AES_KEY', '10c0a163653b0071')
+async def test_login_body_carries_independently_recomputed_aes_vector_and_never_the_plaintext(vendor, monkeypatch):
+    """契约 §1.1：密码必须是 AES-128-ECB+PKCS7+Base64，且明文不出现在请求里。
+
+    期望密文由 `openssl enc -aes-128-ecb` 用同一合成密钥独立复算（见模块常量
+    注释），不取自被测代码；同时确认明文密码没有随请求发出去。
+    """
+    monkeypatch.setenv('MINGLUE_API_PASSWORD', 'VendorPwd-2026')
+    monkeypatch.setenv('MINGLUE_API_AES_KEY', VENDOR_AES_KEY)
     vendor.route('POST', STATUS_PATH, envelope({'entities': []}))
 
     await MinglueApiService.get_device_statuses(['MLR432KP42C19568'])
@@ -138,9 +147,12 @@ async def test_login_body_carries_documented_aes_vector_and_never_the_plaintext(
     login = vendor.login_request()
     assert login.url.path == LOGIN_PATH
     assert login.headers['content-type'].startswith('application/json')
-    assert body_of(login) == {'username': VENDOR_USERNAME, 'password': 'R5V4MqWkJ4kD/zNcqaxPwQ==', 'isLock': True}
-    # 文档示例密钥的加密向量已复算一致，同时确认明文密码没有随请求发出去
-    assert b'"xxx"' not in login.content
+    assert body_of(login) == {
+        'username': VENDOR_USERNAME,
+        'password': VENDOR_PASSWORD_CIPHERTEXT,
+        'isLock': True,
+    }
+    assert b'VendorPwd-2026' not in login.content
 
 
 @pytest.mark.asyncio

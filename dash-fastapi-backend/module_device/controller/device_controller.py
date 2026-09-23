@@ -1,11 +1,6 @@
-import hashlib
-import hmac
-import os
 from datetime import datetime
-from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.enums import BusinessType
@@ -14,6 +9,7 @@ from module_admin.annotation.log_annotation import Log
 from module_admin.aspect.interface_auth import CheckUserInterfaceAuth
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_admin.service.login_service import LoginService
+from module_device.controller.callback_controller import callbackController
 from module_device.entity.vo.device_vo import (
     CallbackPageQueryModel,
     ControlLogPageQueryModel,
@@ -37,7 +33,10 @@ from utils.response_util import ResponseUtil
 
 
 deviceController = APIRouter(prefix='/device', dependencies=[Depends(LoginService.get_current_user)])
-callbackController = APIRouter(prefix='/open/minglue')
+
+#: 厂商回调路由（`/open/minglue/callback`）定义在 callback_controller.py：那条路径
+#: 由厂商直连，不应被 admin 侧的运行期依赖牵住。这里转出以保持既有导入路径可用。
+__all__ = ['callbackController', 'deviceController']
 
 
 @deviceController.get(
@@ -260,38 +259,3 @@ async def get_callback(callback_id: int, query_db: AsyncSession = Depends(get_db
 async def delete_callback(request: Request, callback_ids: str, query_db: AsyncSession = Depends(get_db)):
     result = await CallbackService.delete(query_db, callback_ids)
     return ResponseUtil.success(msg=result.message)
-
-
-def _verify_signature(raw_body: bytes, signature: Optional[str]) -> bool:
-    secret = os.getenv('MINGLUE_CALLBACK_SECRET', '').strip()
-    if not secret:
-        return True
-    if not signature:
-        return False
-    normalized = signature.removeprefix('sha256=').strip().lower()
-    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(normalized, expected)
-
-
-@callbackController.post('/callback')
-@callbackController.post('/callback/{event_type}')
-async def receive_callback(
-    request: Request,
-    event_type: Optional[str] = None,
-    payload: Dict[str, Any] = Body(...),
-    x_signature: Optional[str] = Header(default=None, alias='X-Signature'),
-    x_callback_signature: Optional[str] = Header(default=None, alias='X-Callback-Signature'),
-    query_db: AsyncSession = Depends(get_db),
-):
-    """接收明略设备回调；事件字段未定时仍完整保存原始JSON。
-
-    厂商文档未定义回调签名；``MINGLUE_CALLBACK_SECRET`` 是本系统的加固能力，
-    默认关闭，不得对外声称是厂商标准（契约 §6-5）。
-    """
-    request_ip = request.headers.get('X-Forwarded-For') or (request.client.host if request.client else None)
-    if not _verify_signature(await request.body(), x_signature or x_callback_signature):
-        # 契约 B14：校验失败也必须留审计痕迹，且记录 signature_valid='N'。
-        await CallbackService.record_rejected(query_db, payload, event_type, request_ip)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='回调签名校验失败')
-    await CallbackService.receive(query_db, payload, event_type, request_ip)
-    return JSONResponse(status_code=status.HTTP_200_OK, content={'code': 0})

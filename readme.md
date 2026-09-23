@@ -88,6 +88,29 @@ MINGLUE_API_TIMEOUT=10
 
 若现场接口要求直接传 token 而不是 `Bearer token`，将 `MINGLUE_API_AUTH_SCHEME` 设置为空字符串。
 
+### 回调接入（`POST /open/minglue/callback`）
+
+回调接收地址由接入方自行提供，厂商文档未规定路径；除心跳外 7 类回调的成功响应体也
+未定义，本系统统一返回 `{"code": 0}`。另有三个回调侧开关：
+
+```text
+# 本系统加固用的 HMAC-SHA256 签名密钥。厂商未定义回调签名，此处不是厂商标准：
+# 留空 = 完全不校验（默认，也是生产必须保持的状态）；设置后接受
+# X-Signature / X-Callback-Signature = hex(hmac_sha256(secret, 原始请求体))，
+# 校验失败返回 401 并落 signature_valid='N' 的拒绝记录。
+MINGLUE_CALLBACK_SECRET=
+
+# 同步落库预算（秒）。厂商规定"回调地址响应超过 3s 即视为失败"，默认 2.5s 预留写出
+# 余量。超时后回滚业务改动、落一条 process_status='timeout' 的审计记录（原始报文
+# 完整保留，可重放）并返回 503 供厂商重试；置 0 或负值关闭超时保护（仅排障用）。
+MINGLUE_CALLBACK_RESPONSE_BUDGET=2.5
+
+# 厂商墙钟时间字段（如 update_time）的时区归属。落库口径统一为 UTC naive：Unix 秒
+# 按 UTC 换算，带偏移的 ISO 串按偏移换算，不带偏移的墙钟串按本变量换算（留空 =
+# 原样保存）。厂商文档未说明是否为北京时间，确认为 Asia/Shanghai 时只改这里。
+MINGLUE_VENDOR_TIMEZONE=
+```
+
 ## 目录说明
 
 ```text
@@ -98,12 +121,13 @@ dash-fastapi-frontend/api/device.py       前端 API 封装
 dash-fastapi-frontend/tests/              前端回调/组件测试
 ```
 
-厂商接口对接代码位于 `module_device/service/minglue_api_service.py`，回调字段映射位于 `module_device/service/device_service.py`。
+厂商接口对接代码位于 `module_device/service/minglue_api_service.py`，回调字段映射位于 `module_device/service/device_service.py`，厂商回调入口（路由、签名加固、响应时限）位于 `module_device/controller/callback_controller.py`。
 
 ## 测试
 
 ```bash
-# 后端：数据模型、DAO、迁移与回调字段映射（内存 SQLite 装配，无需真实数据库）
+# 后端：数据模型、DAO、迁移、回调字段映射，以及 8 类回调的请求级测试
+#       （把回调路由挂到最小 FastAPI 应用上发真实请求，内存 SQLite 装配，无需真实数据库）
 cd dash-fastapi-backend
 python3 -m pytest
 
