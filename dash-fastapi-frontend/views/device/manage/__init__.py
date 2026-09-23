@@ -404,7 +404,7 @@ def render(*args, **kwargs):
                     id='device-command-alert',
                     type='info',
                     showIcon=True,
-                    visible=False,
+                    style={'display': 'none'},
                 ),
                 fac.AntdDescriptions(
                     id='device-command-descriptions',

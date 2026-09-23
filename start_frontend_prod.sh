@@ -3,7 +3,9 @@
 # 明略 AI - 前端生产环境启动脚本
 #
 # 用法:
-#   ./start_frontend_prod.sh
+#   ./start_frontend_prod.sh                # 默认后台运行 (nohup + pid 文件 + 日志落盘)
+#   FOREGROUND=1 ./start_frontend_prod.sh   # 前台运行 (排障用)
+#   kill $(cat .run/frontend_prod.pid)      # 停止服务
 #
 # 前置条件:
 #   - Python 3.10+ 已安装 (用于创建 venv)
@@ -84,12 +86,35 @@ export APP_ENV=prod
 HOST="${APP_HOST:-0.0.0.0}"
 PORT="${APP_PORT:-8088}"
 
-echo ">>> Minglue frontend starting (production)"
+LOG_DIR="${ROOT_DIR}/logs"
+PID_FILE="${ROOT_DIR}/.run/frontend_prod.pid"
+LOG_FILE="${LOG_DIR}/frontend_prod.log"
+mkdir -p "${LOG_DIR}" "$(dirname "${PID_FILE}")"
+
+# 已在运行则拒绝重复启动
+if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    echo "ERROR: 前端已在运行 (pid $(cat "${PID_FILE}")), 先停止: kill $(cat "${PID_FILE}")" >&2
+    exit 1
+fi
+
+# FOREGROUND=1 ./start_frontend_prod.sh 可回到前台模式 (排障用)
+if [ -n "${FOREGROUND:-}" ]; then
+    exec env APP_HOST="${HOST}" APP_PORT="${PORT}" "${VENV_PY}" wsgi.py
+fi
+
+echo ">>> Minglue frontend starting (production, background)"
 echo "    env    : ${APP_ENV}"
 echo "    host   : ${HOST}"
 echo "    port   : ${PORT}"
 echo "    venv   : ${VENV_DIR}"
 echo "    url    : http://${HOST}:${PORT}"
+echo "    log    : ${LOG_FILE}"
 echo
 
-exec env APP_HOST="${HOST}" APP_PORT="${PORT}" "${VENV_PY}" wsgi.py
+nohup env APP_HOST="${HOST}" APP_PORT="${PORT}" "${VENV_PY}" wsgi.py \
+    >>"${LOG_FILE}" 2>&1 &
+
+echo $! > "${PID_FILE}"
+echo ">>> 已后台启动, pid: $(cat "${PID_FILE}")"
+echo "    查看日志: tail -f ${LOG_FILE}"
+echo "    停止服务: kill \$(cat ${PID_FILE})"

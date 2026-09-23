@@ -3,7 +3,9 @@
 # 明略 AI - 后端生产环境启动脚本
 #
 # 用法:
-#   ./start_backend_prod.sh
+#   ./start_backend_prod.sh                # 默认后台运行 (nohup + pid 文件 + 日志落盘)
+#   FOREGROUND=1 ./start_backend_prod.sh   # 前台运行 (排障用)
+#   kill $(cat .run/backend_prod.pid)      # 停止服务
 #
 # 前置条件:
 #   - Python 3.10+ 已安装 (用于创建 venv)
@@ -91,18 +93,46 @@ PORT="${APP_PORT:-9099}"
 WORKERS="${APP_WORKERS:-1}"
 ROOT_PATH="${APP_ROOT_PATH:-/prod-api}"
 
-echo ">>> Minglue backend starting (production)"
+LOG_DIR="${ROOT_DIR}/logs"
+PID_FILE="${ROOT_DIR}/.run/backend_prod.pid"
+LOG_FILE="${LOG_DIR}/backend_prod.log"
+mkdir -p "${LOG_DIR}" "$(dirname "${PID_FILE}")"
+
+# 已在运行则拒绝重复启动
+if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    echo "ERROR: 后端已在运行 (pid $(cat "${PID_FILE}")), 先停止: kill $(cat "${PID_FILE}")" >&2
+    exit 1
+fi
+
+# FOREGROUND=1 ./start_backend_prod.sh 可回到前台模式 (排障用)
+if [ -n "${FOREGROUND:-}" ]; then
+    exec "${VENV_PY}" -m uvicorn app:app \
+        --host "${HOST}" \
+        --port "${PORT}" \
+        --workers "${WORKERS}" \
+        --root-path "${ROOT_PATH}" \
+        --proxy-headers
+fi
+
+echo ">>> Minglue backend starting (production, background)"
 echo "    env       : ${APP_ENV}"
 echo "    host      : ${HOST}"
 echo "    port      : ${PORT}"
 echo "    workers   : ${WORKERS}"
 echo "    root_path : ${ROOT_PATH}"
 echo "    venv      : ${VENV_DIR}"
+echo "    log       : ${LOG_FILE}"
 echo
 
-exec "${VENV_PY}" -m uvicorn app:app \
+nohup "${VENV_PY}" -m uvicorn app:app \
     --host "${HOST}" \
     --port "${PORT}" \
     --workers "${WORKERS}" \
     --root-path "${ROOT_PATH}" \
-    --proxy-headers
+    --proxy-headers \
+    >>"${LOG_FILE}" 2>&1 &
+
+echo $! > "${PID_FILE}"
+echo ">>> 已后台启动, pid: $(cat "${PID_FILE}")"
+echo "    查看日志: tail -f ${LOG_FILE}"
+echo "    停止服务: kill \$(cat ${PID_FILE})"

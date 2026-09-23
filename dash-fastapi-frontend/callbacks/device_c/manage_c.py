@@ -610,7 +610,7 @@ def open_command_modal(
         Output('device-command-msg-id', 'value', allow_duplicate=True),
         Output('device-command-alert', 'children'),
         Output('device-command-alert', 'type'),
-        Output('device-command-alert', 'visible'),
+        Output('device-command-alert', 'style'),
         Output('device-command-result-modal', 'visible'),
         Output('device-command-descriptions', 'items'),
     ],
@@ -639,7 +639,7 @@ def query_command_result(ok, device_code, msg_id):
                 no_update,
                 '请填写 msg_id；本账号无控制日志查询权限，无法自动取最近一条指令',
                 'warning',
-                True,
+                {'display': 'block'},
                 False,
                 no_update,
             )
@@ -657,7 +657,7 @@ def query_command_result(ok, device_code, msg_id):
                 no_update,
                 classified['message'],
                 'error',
-                True,
+                {'display': 'block'},
                 False,
                 no_update,
             )
@@ -667,7 +667,7 @@ def query_command_result(ok, device_code, msg_id):
                 no_update,
                 '该设备暂无本地控制日志，请先下发开始/停止录音指令',
                 'warning',
-                True,
+                {'display': 'block'},
                 False,
                 no_update,
             )
@@ -680,7 +680,7 @@ def query_command_result(ok, device_code, msg_id):
             msg_id,
             classified['message'],
             'error',
-            True,
+            {'display': 'block'},
             False,
             no_update,
         )
@@ -689,7 +689,7 @@ def query_command_result(ok, device_code, msg_id):
         msg_id,
         alert['text'],
         alert['type'],
-        True,
+        {'display': 'block'},
         True,
         logic.command_result_items(data),
     )

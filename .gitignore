@@ -136,3 +136,7 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# 启动脚本运行时产物 (pid / 后台日志)
+.run/
+logs/
