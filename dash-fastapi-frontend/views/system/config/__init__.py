@@ -46,7 +46,7 @@ def render(*args, **kwargs):
                                                         ),
                                                         label='参数名称',
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                     fac.AntdFormItem(
@@ -61,7 +61,7 @@ def render(*args, **kwargs):
                                                         ),
                                                         label='参数键名',
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                     fac.AntdFormItem(
@@ -75,7 +75,7 @@ def render(*args, **kwargs):
                                                         ),
                                                         label='系统内置',
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                     fac.AntdFormItem(
@@ -87,7 +87,7 @@ def render(*args, **kwargs):
                                                         ),
                                                         label='创建时间',
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                     fac.AntdFormItem(
@@ -100,7 +100,7 @@ def render(*args, **kwargs):
                                                             ),
                                                         ),
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                     fac.AntdFormItem(
@@ -112,7 +112,7 @@ def render(*args, **kwargs):
                                                             ),
                                                         ),
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                 ],
@@ -233,7 +233,7 @@ def render(*args, **kwargs):
                                             )
                                             else [],
                                         ],
-                                        style={'paddingBottom': '10px'},
+                                        style={'paddingBottom': '20px'},
                                     ),
                                     span=16,
                                 ),
@@ -272,7 +272,7 @@ def render(*args, **kwargs):
                                         ],
                                         style={
                                             'float': 'right',
-                                            'paddingBottom': '10px',
+                                            'paddingBottom': '20px',
                                         },
                                     ),
                                     span=8,

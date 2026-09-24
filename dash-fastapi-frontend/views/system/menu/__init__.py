@@ -83,7 +83,7 @@ def render(*args, **kwargs):
                                                             ),
                                                         ],
                                                         style={
-                                                            'paddingBottom': '10px'
+                                                            'paddingBottom': '20px'
                                                         },
                                                     ),
                                                 ],
@@ -137,7 +137,7 @@ def render(*args, **kwargs):
                                                 },
                                             ),
                                         ],
-                                        style={'paddingBottom': '10px'},
+                                        style={'paddingBottom': '20px'},
                                     ),
                                     span=16,
                                 ),
@@ -176,7 +176,7 @@ def render(*args, **kwargs):
                                         ],
                                         style={
                                             'float': 'right',
-                                            'paddingBottom': '10px',
+                                            'paddingBottom': '20px',
                                         },
                                     ),
                                     span=8,

@@ -93,7 +93,8 @@ def render(*args, **kwargs):
                             icon=fac.AntdIcon(icon='antd-sync'),
                         )
                     ),
-                ]
+                ],
+                style={'paddingBottom': '20px'},
             ),
             layout='inline',
         ),
@@ -114,7 +115,7 @@ def render(*args, **kwargs):
                     icon=fac.AntdIcon(icon='antd-sync'),
                 ),
             ],
-            style={'paddingBottom': '12px'},
+            style={'paddingBottom': '20px'},
         ),
         fac.AntdSpin(
             fac.AntdTable(
